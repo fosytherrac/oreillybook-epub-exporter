@@ -102,25 +102,41 @@
     const query = document.getElementById('browse-query').value.trim();
     const label = (query || topic || 'oreilly-catalog')
       .replace(/[^a-zA-Z0-9\s-]/g, '').replace(/\s+/g, '-').toLowerCase() || 'oreilly-catalog';
-    const LIMIT = 100; // proven page size for the search API
 
     try {
       setStatus('Fetching page 1…');
       let effTopic = topic, effQuery = query;
-      let first = await fetchSearchPage(effTopic, effQuery, 0, LIMIT);
-      // Same fallback the background search uses: if an empty topic browse comes
-      // back blank, retry using the topic name as the query.
+
+      // Probe a large page size; only adopt it if O'Reilly actually returns that
+      // many. If it silently caps (returns fewer while more data exists), paging
+      // by the requested size could skip records — so fall back to a safe 100.
+      const PROBE = 500, SAFE = 100;
+      let LIMIT = SAFE;
+      let first = null;
+      try {
+        first = await fetchSearchPage(effTopic, effQuery, 0, PROBE);
+        if (first.books.length === PROBE) LIMIT = PROBE; // honored → big pages are safe
+      } catch (e) {
+        if (e.message === 'SESSION_EXPIRED') throw e;     // real auth problem
+        first = null;                                     // rejected the big limit
+      }
+      // Re-fetch at the safe size when the probe was capped/rejected AND there's
+      // more data than it returned (i.e. we can't trust page×PROBE offsets).
+      if (LIMIT === SAFE && (!first || (first.total && first.books.length < first.total))) {
+        first = await fetchSearchPage(effTopic, effQuery, 0, SAFE);
+      }
+
+      // Empty-topic-browse fallback: retry using the topic name as the query.
       if (first.books.length === 0 && topic && !query) {
         effTopic = ''; effQuery = topic;
         first = await fetchSearchPage(effTopic, effQuery, 0, LIMIT);
       }
 
-      const pageSize = first.books.length || LIMIT;
       const total = first.total || first.books.length;
-      const totalPages = Math.max(1, Math.ceil(total / pageSize));
+      const totalPages = Math.max(1, Math.ceil(total / LIMIT));
       const all = [...first.books];
 
-      if (totalPages > 1) {
+      if (totalPages > 1 && all.length < total) {
         const pageNums = [];
         for (let p = 1; p < totalPages; p++) pageNums.push(p);
         const perPage = await Downloader._adaptivePool(pageNums, async (p, idx, onRateLimit) => {
