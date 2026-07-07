@@ -117,8 +117,9 @@ const CatalogUI = {
   },
 
   // Render book cards into a container (shared by live search and the local
-  // index). onDownload(book, btn) is invoked when a book's 📥 is clicked.
-  renderBooks(container, books, onDownload) {
+  // index). onDownload(book, btn) fires on a book's 📥. If opts.onQueue is
+  // given, each row also gets a ＋ button that calls opts.onQueue(book, btn).
+  renderBooks(container, books, onDownload, opts = {}) {
     container.textContent = '';
     books.forEach((book) => {
       const row = document.createElement('div');
@@ -167,6 +168,16 @@ const CatalogUI = {
       dl.disabled = !book.isbn;
       dl.addEventListener('click', () => onDownload(book, dl));
       actions.appendChild(dl);
+
+      if (opts.onQueue) {
+        const q = document.createElement('button');
+        q.className = 'book-row-btn';
+        q.textContent = '＋';
+        q.title = book.isbn ? 'Add to download queue' : 'No ISBN available';
+        q.disabled = !book.isbn;
+        q.addEventListener('click', () => opts.onQueue(book, q));
+        actions.appendChild(q);
+      }
 
       if (book.webUrl) {
         const open = document.createElement('a');

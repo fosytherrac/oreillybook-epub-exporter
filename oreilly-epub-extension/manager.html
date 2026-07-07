@@ -55,9 +55,29 @@
       </div>
       <input id="local-search" class="control control-input index-search" type="text"
              placeholder="Search the local index instantly…" autocomplete="off" disabled>
-      <div id="local-status" class="status"></div>
+      <div class="index-subrow">
+        <div id="local-status" class="status"></div>
+        <button id="btn-queue-all" class="btn-secondary" style="display:none;">＋ Queue all matches</button>
+      </div>
       <div id="local-results" class="results"></div>
       <button id="btn-local-more" class="btn-secondary" style="display:none;">Show more</button>
+    </section>
+
+    <!-- Bulk download queue -->
+    <section id="queue-panel" class="queue-panel" style="display:none;">
+      <div class="queue-head">
+        <div class="queue-title">⬇ Download queue <span id="queue-count"></span></div>
+        <div class="queue-controls">
+          <button id="btn-queue-start" class="btn-primary">Start</button>
+          <button id="btn-queue-stop" class="btn-secondary" style="display:none;">Stop</button>
+          <button id="btn-queue-retry" class="btn-secondary" style="display:none;">Retry failed</button>
+          <button id="btn-queue-clear" class="btn-secondary">Clear</button>
+        </div>
+      </div>
+      <div class="queue-progress-bar"><div id="queue-progress-fill"></div></div>
+      <div id="queue-status" class="status"></div>
+      <div id="queue-list" class="queue-list"></div>
+      <p class="hint">Bulk downloads run one at a time as EPUB (PDF needs the per-book print dialog). Your browser may ask once to allow multiple downloads — click Allow. A failed book (e.g. a video/audio title) is skipped and the queue continues.</p>
     </section>
   </main>
 

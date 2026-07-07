@@ -176,6 +176,162 @@
     }
   }
 
+  // ---- Bulk download queue: run many books sequentially, EPUB only ----
+  const BulkQueue = (function () {
+    const els = {
+      panel: document.getElementById('queue-panel'),
+      count: document.getElementById('queue-count'),
+      start: document.getElementById('btn-queue-start'),
+      stop: document.getElementById('btn-queue-stop'),
+      retry: document.getElementById('btn-queue-retry'),
+      clear: document.getElementById('btn-queue-clear'),
+      fill: document.getElementById('queue-progress-fill'),
+      status: document.getElementById('queue-status'),
+      list: document.getElementById('queue-list'),
+    };
+    const items = [];         // { isbn, title, webUrl, status, pct, error, el, badge }
+    const byIsbn = new Map();
+    let processing = false;
+    let stopRequested = false;
+    let controller = null;
+
+    const badge = (it) => it.status === 'pending' ? '⏳'
+      : it.status === 'active' ? `${it.pct || 0}%`
+      : it.status === 'done' ? '✓' : '⚠';
+
+    function refreshHeader() {
+      const done = items.filter((i) => i.status === 'done').length;
+      const failed = items.filter((i) => i.status === 'failed').length;
+      els.panel.style.display = items.length ? '' : 'none';
+      els.count.textContent = items.length
+        ? `— ${items.length} book${items.length === 1 ? '' : 's'}` +
+          (done || failed ? ` (${done} done${failed ? ', ' + failed + ' failed' : ''})` : '')
+        : '';
+      els.fill.style.width = `${items.length ? Math.round((done + failed) / items.length * 100) : 0}%`;
+      els.retry.style.display = (!processing && failed > 0) ? '' : 'none';
+    }
+
+    function renderItem(it) {
+      const row = document.createElement('div');
+      row.className = 'queue-item status-' + it.status;
+      const t = document.createElement('span');
+      t.className = 'queue-item-title'; t.textContent = it.title; t.title = it.title;
+      const b = document.createElement('span');
+      b.className = 'queue-item-badge'; b.textContent = badge(it);
+      const x = document.createElement('button');
+      x.className = 'queue-item-x'; x.textContent = '✕'; x.title = 'Remove';
+      x.addEventListener('click', () => remove(it.isbn));
+      row.append(t, b, x);
+      it.el = row; it.badge = b;
+      return row;
+    }
+
+    function setStatus(it, status, pct, error) {
+      it.status = status;
+      if (pct != null) it.pct = pct;
+      if (error != null) it.error = error;
+      if (it.el) it.el.className = 'queue-item status-' + status;
+      if (it.badge) { it.badge.textContent = badge(it); if (error) it.badge.title = error; }
+    }
+
+    function add(book) {
+      if (!book.isbn || byIsbn.has(book.isbn)) return false;
+      const it = { isbn: book.isbn, title: book.title, webUrl: book.webUrl, status: 'pending', pct: 0 };
+      items.push(it);
+      byIsbn.set(book.isbn, it);
+      els.list.appendChild(renderItem(it));
+      refreshHeader();
+      return true;
+    }
+
+    function remove(isbn) {
+      const it = byIsbn.get(isbn);
+      if (!it || it.status === 'active') return; // never yank the in-flight one
+      items.splice(items.indexOf(it), 1);
+      byIsbn.delete(isbn);
+      if (it.el) it.el.remove();
+      refreshHeader();
+    }
+
+    function queuePct(p) {
+      const imgPct = p.totalImages > 0 ? (p.images || 0) / p.totalImages : 1;
+      const chPct = p.totalChapters > 0 ? (p.chapter || 0) / p.totalChapters : 0;
+      return Math.round(imgPct * 30 + chPct * 70);
+    }
+
+    async function start() {
+      if (processing) return;
+      if (!items.some((i) => i.status === 'pending' || i.status === 'failed')) {
+        els.status.textContent = 'Nothing to download.'; return;
+      }
+      processing = true; stopRequested = false; busy = true;
+      els.start.style.display = 'none'; els.stop.style.display = '';
+      els.clear.disabled = true; els.retry.style.display = 'none';
+
+      let first = true;
+      for (const it of items) {
+        if (stopRequested) break;
+        if (it.status !== 'pending' && it.status !== 'failed') continue;
+        if (!first) await new Promise((r) => setTimeout(r, 1200)); // gentle gap between books
+        first = false;
+        if (stopRequested) break;
+
+        setStatus(it, 'active', 0);
+        if (it.el) it.el.scrollIntoView({ block: 'nearest' });
+        controller = new AbortController();
+        try {
+          // Bulk is EPUB only — PDF would open a modal print dialog per book.
+          const res = await Downloader.download({
+            isbn: it.isbn, apiBase: API_BASE, signal: controller.signal,
+            fallbackTitle: it.title, format: 'epub',
+            onProgress: (p) => setStatus(it, 'active', queuePct(p)),
+          });
+          Downloader.triggerBrowserDownload(res.blob, res.filename);
+          setStatus(it, 'done', 100);
+        } catch (e) {
+          if (e.name === 'AbortError') { setStatus(it, 'pending', 0); break; }
+          console.warn('Queue item failed:', it.isbn, e);
+          setStatus(it, 'failed', 0, e.message);
+        }
+        const d = items.filter((i) => i.status === 'done').length;
+        els.status.textContent = `Downloading… ${d}/${items.length} done`;
+        refreshHeader();
+      }
+
+      processing = false; busy = false; controller = null;
+      els.start.style.display = ''; els.stop.style.display = 'none'; els.clear.disabled = false;
+      refreshHeader();
+      const d = items.filter((i) => i.status === 'done').length;
+      const f = items.filter((i) => i.status === 'failed').length;
+      els.status.textContent = stopRequested
+        ? `Stopped — ${d} done, ${f} failed, ${items.length - d - f} left.`
+        : `Finished — ${d} done${f ? ', ' + f + ' failed' : ''}.`;
+    }
+
+    els.start.addEventListener('click', start);
+    els.stop.addEventListener('click', () => { stopRequested = true; if (controller) controller.abort(); });
+    els.clear.addEventListener('click', () => {
+      if (processing) return;
+      items.length = 0; byIsbn.clear();
+      els.list.textContent = ''; els.status.textContent = '';
+      refreshHeader();
+    });
+    els.retry.addEventListener('click', () => {
+      items.forEach((it) => { if (it.status === 'failed') setStatus(it, 'pending', 0); });
+      refreshHeader(); start();
+    });
+
+    return {
+      add,
+      addMany(books) {
+        let n = 0;
+        for (const b of books) if (add(b)) n++;
+        els.status.textContent = n ? `Added ${n} to the queue.` : 'Those are already queued.';
+        return n;
+      },
+    };
+  })();
+
   // ---- Local catalog index: instant, offline search over stored metadata ----
   const LocalIndex = (function () {
     const els = {
@@ -188,6 +344,7 @@
       searchStatus: document.getElementById('local-status'),
       results: document.getElementById('local-results'),
       more: document.getElementById('btn-local-more'),
+      queueAll: document.getElementById('btn-queue-all'),
     };
     const PAGE = 60;
     let books = [];      // normalized + a lowercase `_s` search field, title-sorted
@@ -228,8 +385,13 @@
 
     function render() {
       const slice = filtered.slice(0, shown);
-      CatalogUI.renderBooks(els.results, slice, inPageDownload);
+      CatalogUI.renderBooks(els.results, slice, inPageDownload, {
+        onQueue: (book, btn) => { if (BulkQueue.add(book)) { btn.textContent = '✓'; btn.disabled = true; } },
+      });
       els.more.style.display = filtered.length > shown ? '' : 'none';
+      const withIsbn = filtered.filter((b) => b.isbn).length;
+      els.queueAll.style.display = withIsbn ? '' : 'none';
+      els.queueAll.textContent = `＋ Queue all ${withIsbn.toLocaleString()} matches`;
       els.searchStatus.textContent = filtered.length
         ? `${filtered.length.toLocaleString()} match${filtered.length === 1 ? '' : 'es'} (showing ${slice.length})`
         : (books.length ? 'No matches.' : '');
@@ -294,6 +456,10 @@
     els.clear.addEventListener('click', clear);
     els.search.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 120); });
     els.more.addEventListener('click', () => { shown += PAGE; render(); });
+    els.queueAll.addEventListener('click', () => {
+      const n = BulkQueue.addMany(filtered.filter((b) => b.isbn));
+      els.searchStatus.textContent = `Queued ${n} book${n === 1 ? '' : 's'} for download.`;
+    });
 
     return {
       async load() {
