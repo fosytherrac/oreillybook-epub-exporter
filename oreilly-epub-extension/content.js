@@ -43,7 +43,7 @@
 
   // Listen for commands
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.action === 'startDownload') startDownload();
+    if (message.action === 'startDownload') startDownload(message.isbn);
     else if (message.action === 'cancelDownload') cancelDownload();
     else if (message.action === 'getBookInfo') {
       sendResponse({ isbn: Fetcher.extractIsbn(window.location.href) });
@@ -81,9 +81,12 @@
     });
   }
 
-  async function startDownload() {
+  // isbnOverride lets a catalog-initiated download target a specific book even
+  // if the current URL is not that book's page. Falls back to the page URL for
+  // the classic "download the book I'm viewing" flow.
+  async function startDownload(isbnOverride) {
     if (abortController) return; // Already downloading
-    const isbn = Fetcher.extractIsbn(window.location.href);
+    const isbn = isbnOverride || Fetcher.extractIsbn(window.location.href);
     if (!isbn) return;
 
     const controller = new AbortController();

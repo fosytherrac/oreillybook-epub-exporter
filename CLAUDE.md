@@ -6,6 +6,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Chrome extension (Manifest V3) that converts O'Reilly Learning books to EPUB 3.0 format, optimized for e-ink readers. Runs entirely in the browser using the user's existing O'Reilly session — no backend server.
 
+Two ways in:
+- **Single book** — on a book page, one click exports the book you're viewing (ISBN taken from the URL).
+- **Catalog browse** — the popup can list every book in a category / search term across the whole O'Reilly catalog (pages through the search API in the service worker), export the list as CSV, and download any result. Catalog "Download" opens the book's page in a new tab and auto-starts its export — the EPUB build needs a page/DOM context (DOMParser), so it can't run in the service worker.
+
 ## Running Tests
 
 Tests run in a browser (no Node.js test runner):
@@ -42,6 +46,7 @@ All expose global objects (`Fetcher`, `EpubBuilder`, `EinkOptimizer`) — no imp
 - `lib/fetcher.js` — HTTP fetching with retry + progressive backoff. Handles both 403 and 429 as rate limits. ISBN extraction from URLs via regex. Also provides: `parseXhtml()` (XHTML parser with text/html fallback), `extractImageUrls()` (extracts `<img>`, `<image>`, `<object>` sources with deduplication), `extractCssImageUrls()` (CSS `url()` extraction), `stripQueryAndHash()`.
 - `lib/epub-builder.js` — Generates EPUB structural files (content.opf, toc.xhtml, toc.ncx, container.xml, cover.xhtml). Pure string generation, no side effects.
 - `lib/eink-optimizer.js` — Rewrites chapter XHTML via DOM manipulation (DOMParser + XMLSerializer): injects e-ink CSS override, remaps image paths to `../Images/`, rewrites CSS links to `../Styles/`. Uses `Fetcher.parseXhtml()` for robust parsing. Serializes back via `XMLSerializer` to avoid HTML entity mismatches.
+- `lib/catalog.js` — Pure helpers for the catalog search API: `buildSearchUrl()`, `parseSearchResponse()`, `normalizeBook()`, `extractIsbn()` (defensive — reads `isbn`/`archive_id`/`identifier` or an ISBN embedded in a URL), `nextUrlFromResponse()`, and a `TOPICS` list of common categories. No fetching — `background.js` does the paging. Unlike the other lib modules it is **not** a content script; the SW pulls it in with `importScripts('lib/catalog.js')` (guarded by `typeof importScripts === 'function'` so the test runner, which loads it via `<script>`, doesn't break), and the popup loads it with a `<script>` tag.
 - `lib/jszip.min.js` — Third-party EPUB packaging.
 
 ### Key Implementation Details
@@ -57,10 +62,13 @@ All expose global objects (`Fetcher`, `EpubBuilder`, `EinkOptimizer`) — no imp
 - **`mimetype` must be the first ZIP entry** with `{compression: 'STORE'}` per EPUB spec.
 - **EPUB includes both EPUB 3 nav (`toc.xhtml`) and EPUB 2 NCX (`toc.ncx`)** for Boox reader compatibility.
 - **Query/hash stripping**: Image URLs with `?v=123` or `#fragment` are cleaned before API requests to avoid 404s.
+- **Catalog search runs in the service worker** (`searchCatalog` handler), not a content script, so it works regardless of the active tab — same-origin cookies still ride along. It pages until it hits `maxBooks` (default 200, hard cap 1000) or the last page, dedupes by ISBN, and reports `{ books, total, truncated }`. Because the search API's exact response shape is undocumented/variable, `Catalog.parseSearchResponse`/`normalizeBook` are written defensively (multiple candidate field names). If `query=*` returns nothing while browsing a topic, the loop retries once with the topic name as the query.
+- **Catalog download is cross-tab**: `downloadBook` opens the book page (`active: true`) and stores the ISBN in `state.pendingDownloadIsbnByTab`; when that tab's content script fires `bookDetected`, `background.js` auto-starts the export for it. `startDownload` (content + SW) accepts an optional `isbn` so a catalog-initiated export can target a book that isn't the current URL.
 
 ## O'Reilly API Endpoints Used
 
 - `GET /api/v2/search/?query={ISBN}&limit=1` — book metadata (title, authors)
+- `GET /api/v2/search/?query={term}&formats=book&limit={n}&page={0-based}` — catalog browse/search (paginated; response parsed by `lib/catalog.js`)
 - `GET /api/v2/epubs/urn:orm:book:{ISBN}/files/?limit=200` — file manifest (paginated)
 - `GET /api/v2/epubs/urn:orm:book:{ISBN}/files/{path}` — individual file content
 

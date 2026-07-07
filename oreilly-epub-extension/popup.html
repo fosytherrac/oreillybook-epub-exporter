@@ -13,7 +13,7 @@
   <div id="state-not-oreilly" class="state" style="display:none;">
     <div class="notice">
       <div class="notice-icon">📖</div>
-      <div class="notice-text">Navigate to an O'Reilly book page to get started</div>
+      <div class="notice-text">Open a book to download it directly, or browse the catalog below.</div>
     </div>
   </div>
 
@@ -53,6 +53,25 @@
     <button id="btn-retry" class="btn-primary">Retry</button>
   </div>
 
+  <!-- Catalog browser: always available, independent of the current tab -->
+  <div class="browse">
+    <div class="browse-header">Browse the catalog</div>
+    <div class="browse-controls">
+      <select id="browse-topic" class="browse-select">
+        <option value="">All categories</option>
+      </select>
+      <input id="browse-query" class="browse-input" type="text"
+             placeholder="or type a search term…" autocomplete="off">
+      <button id="btn-browse" class="btn-primary browse-btn">List books</button>
+    </div>
+    <div id="browse-status" class="browse-status"></div>
+    <div id="browse-results" class="browse-results"></div>
+    <button id="btn-export" class="btn-secondary browse-export" style="display:none;">
+      ⬇ Export list (CSV)
+    </button>
+  </div>
+
+  <script src="lib/catalog.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

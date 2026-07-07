@@ -25,6 +25,9 @@
   <script src="../lib/fetcher.js"></script>
   <script src="../lib/epub-builder.js"></script>
   <script src="../lib/eink-optimizer.js"></script>
+  <!-- Catalog is used by background.js (via importScripts in the SW); the test
+       runner loads it as a plain script and importScripts is a no-op here -->
+  <script src="../lib/catalog.js"></script>
   <!-- content.js registers listener 0, background.js registers listener 1 -->
   <script src="../content.js"></script>
   <script src="../background.js"></script>
@@ -72,6 +75,7 @@
   <script src="background-state.test.js"></script>
   <script src="epub-compliance.test.js"></script>
   <script src="path-utils.test.js"></script>
+  <script src="catalog.test.js"></script>
 
   <!-- Run all tests (async) -->
   <script>

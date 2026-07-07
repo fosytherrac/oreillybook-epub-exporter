@@ -1,13 +1,37 @@
 // Service Worker: message relay, badge, state, progress broadcast
 // Uses chrome.storage.session to survive SW termination (MV3 lifecycle)
 
+// Shared catalog helpers (search URL building + response parsing). importScripts
+// only exists in the worker context; the guard keeps the browser test runner
+// happy — there this file loads via a <script> tag and Catalog is provided
+// separately.
+if (typeof importScripts === 'function') {
+  importScripts('lib/catalog.js');
+}
+
 const DEFAULT_STATE = {
   status: 'idle', // idle | downloading | complete | error
   progress: null,
   error: null,
   downloadingTabId: null,
   bookInfoByTab: {},
+  // Tabs opened from the catalog that should auto-download once their content
+  // script reports in: { [tabId]: isbn }
+  pendingDownloadIsbnByTab: {},
 };
+
+// Start a download in a given tab, optionally targeting a specific ISBN.
+// Returns false (and rolls back state) if the content script is unreachable.
+async function beginDownload(tabId, isbn) {
+  await setState({ downloadingTabId: tabId, status: 'downloading', progress: null, error: null });
+  try {
+    await chrome.tabs.sendMessage(tabId, { action: 'startDownload', isbn });
+    return true;
+  } catch (err) {
+    await setState({ status: 'idle', progress: null, error: null, downloadingTabId: null });
+    return false;
+  }
+}
 
 async function getState() {
   const result = await chrome.storage.session.get('state');
@@ -32,7 +56,9 @@ async function removeTabBookInfo(tabId) {
   const state = await getState();
   const bookInfoByTab = { ...state.bookInfoByTab };
   delete bookInfoByTab[tabId];
-  const updates = { bookInfoByTab };
+  const pendingDownloadIsbnByTab = { ...(state.pendingDownloadIsbnByTab || {}) };
+  delete pendingDownloadIsbnByTab[tabId];
+  const updates = { bookInfoByTab, pendingDownloadIsbnByTab };
   if (state.downloadingTabId === tabId) {
     updates.status = 'idle';
     updates.progress = null;
@@ -74,17 +100,110 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           sendResponse({ ok: false, reason: 'no_tab' });
           return;
         }
-        await setState({ downloadingTabId: targetTabId, status: 'downloading' });
-        try {
-          await chrome.tabs.sendMessage(targetTabId, { action: 'startDownload' });
-        } catch (err) {
+        const started = await beginDownload(targetTabId, message.isbn);
+        if (!started) {
           // Content script unreachable (e.g. extension reloaded, page not refreshed):
-          // roll back so the UI is not stuck in a downloading state forever
-          await setState({ status: 'idle', progress: null, error: null, downloadingTabId: null });
+          // beginDownload already rolled state back so the UI is not stuck.
           sendResponse({ ok: false, reason: 'content_script_unreachable' });
           return;
         }
         sendResponse({ ok: true });
+        return;
+      }
+
+      case 'searchCatalog': {
+        // Page through the search API and collect up to maxBooks results for a
+        // category/search term. Runs entirely in the SW so it works no matter
+        // what tab is active (same-origin cookies come along automatically).
+        const query = message.query || '';
+        const topic = message.topic || '';
+        const maxBooks = Math.min(message.maxBooks || 200, 1000);
+        const limit = 100;
+        try {
+          const books = [];
+          const seen = new Set();
+          let total = 0;
+          let page = 0;
+          let effectiveQuery = query;
+          let triedFallback = false;
+          let url = Catalog.buildSearchUrl({ query: effectiveQuery, topic, page, limit });
+
+          while (url && books.length < maxBooks && page < 50) {
+            const res = await fetch(url, { credentials: 'include' });
+            if (res.status === 401) throw new Error('SESSION_EXPIRED');
+            if (res.status === 429 || res.status === 403) throw new Error('RATE_LIMITED');
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const json = await res.json();
+            const parsed = Catalog.parseSearchResponse(json);
+            total = parsed.total || total;
+
+            // Some deployments reject query='*'. If the first page came back
+            // empty while browsing a topic, retry once using the topic name as
+            // the search term.
+            if (parsed.books.length === 0 && page === 0 && !triedFallback &&
+                topic && !(query && query.trim())) {
+              triedFallback = true;
+              effectiveQuery = topic;
+              url = Catalog.buildSearchUrl({ query: effectiveQuery, page, limit });
+              continue;
+            }
+
+            for (const b of parsed.books) {
+              const key = b.isbn || b.webUrl || b.title;
+              if (seen.has(key)) continue;
+              seen.add(key);
+              books.push(b);
+              if (books.length >= maxBooks) break;
+            }
+
+            if (parsed.books.length < limit) break; // reached the last page
+            page += 1;
+            const next = Catalog.nextUrlFromResponse(json);
+            url = next || Catalog.buildSearchUrl({ query: effectiveQuery, topic, page, limit });
+            await new Promise((r) => setTimeout(r, 300)); // be gentle on the API
+          }
+
+          sendResponse({
+            ok: true,
+            books,
+            total: Math.max(total, books.length),
+            truncated: total > books.length,
+          });
+        } catch (err) {
+          const msg = err.message === 'SESSION_EXPIRED'
+            ? 'Session expired. Log in to O\'Reilly and try again.'
+            : err.message === 'RATE_LIMITED'
+            ? 'O\'Reilly is rate-limiting requests. Wait a moment and try again.'
+            : err.message;
+          sendResponse({ ok: false, error: msg });
+        }
+        return;
+      }
+
+      case 'downloadBook': {
+        // Open the book's page in a new tab and remember to auto-start its
+        // download once the content script there detects the book. The heavy
+        // EPUB assembly needs a page context (DOMParser), so it must run in a
+        // content script — the SW cannot build the EPUB itself.
+        const isbn = message.isbn;
+        const url = message.webUrl ||
+          (isbn ? `https://learning.oreilly.com/library/view/-/${isbn}/` : null);
+        if (!isbn || !url) {
+          sendResponse({ ok: false, reason: 'no_isbn' });
+          return;
+        }
+        let tab;
+        try {
+          tab = await chrome.tabs.create({ url, active: true });
+        } catch (err) {
+          sendResponse({ ok: false, reason: 'tab_create_failed', error: err.message });
+          return;
+        }
+        const st = await getState();
+        await setState({
+          pendingDownloadIsbnByTab: { ...st.pendingDownloadIsbnByTab, [tab.id]: isbn },
+        });
+        sendResponse({ ok: true, tabId: tab.id });
         return;
       }
 
@@ -98,12 +217,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
-      case 'bookDetected':
-        if (sender.tab?.id != null) {
-          await setTabBookInfo(sender.tab.id, message.bookInfo);
+      case 'bookDetected': {
+        const tabId = sender.tab?.id;
+        if (tabId != null) {
+          await setTabBookInfo(tabId, message.bookInfo);
+          // If this tab was opened from the catalog to download a specific
+          // book, kick that download off now that the page is ready.
+          const st = await getState();
+          const pendingIsbn = st.pendingDownloadIsbnByTab?.[tabId];
+          if (pendingIsbn && st.status !== 'downloading') {
+            const pending = { ...st.pendingDownloadIsbnByTab };
+            delete pending[tabId];
+            await setState({ pendingDownloadIsbnByTab: pending });
+            await beginDownload(tabId, pendingIsbn);
+          }
         }
         sendResponse({ ok: true });
         return;
+      }
 
       case 'progress': {
         const st = await getState();

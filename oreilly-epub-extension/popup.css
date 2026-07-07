@@ -1,5 +1,5 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
-body { width: 300px; font-family: system-ui, -apple-system, sans-serif; font-size: 13px; color: #333; }
+body { width: 340px; font-family: system-ui, -apple-system, sans-serif; font-size: 13px; color: #333; }
 .header { display: flex; align-items: center; gap: 8px; padding: 12px 16px; }
 .logo { width: 28px; height: 28px; background: #d44; border-radius: 6px; display: flex; align-items: center; justify-content: center; color: #fff; font-weight: bold; font-size: 14px; }
 .title { font-weight: 600; font-size: 14px; }
@@ -20,3 +20,22 @@ body { width: 300px; font-family: system-ui, -apple-system, sans-serif; font-siz
 .notice-icon { font-size: 20px; margin-bottom: 4px; }
 .notice-text { font-size: 13px; color: #92400e; }
 .notice.error .notice-text { color: #dc2626; }
+
+/* ---- Catalog browser ---- */
+.browse { border-top: 1px solid #eee; padding: 12px 16px 16px; }
+.browse-header { font-weight: 600; font-size: 12px; color: #444; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.03em; }
+.browse-controls { display: flex; flex-direction: column; gap: 6px; }
+.browse-select, .browse-input { width: 100%; padding: 8px; font-size: 13px; border: 1px solid #ddd; border-radius: 6px; background: #fff; color: #333; }
+.browse-btn { margin-top: 2px; }
+.browse-status { font-size: 11px; color: #888; margin: 10px 0 6px; min-height: 14px; }
+.browse-results { max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.book-row { display: flex; align-items: center; gap: 8px; background: #f7f7f7; border-radius: 6px; padding: 6px 8px; }
+.book-cover { width: 28px; height: 38px; object-fit: cover; border-radius: 3px; flex-shrink: 0; background: #e5e7eb; }
+.book-row-info { flex: 1; min-width: 0; }
+.book-row-title { font-weight: 600; font-size: 12px; color: #222; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.book-row-authors { font-size: 10px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.book-row-actions { display: flex; gap: 4px; flex-shrink: 0; }
+.book-row-btn { display: flex; align-items: center; justify-content: center; width: 26px; height: 26px; border: 1px solid #ddd; border-radius: 6px; background: #fff; color: #444; font-size: 13px; cursor: pointer; text-decoration: none; }
+.book-row-btn:hover { background: #eef2ff; border-color: #c7d2fe; }
+.book-row-btn:disabled { opacity: 0.4; cursor: default; }
+.browse-export { margin-top: 10px; }
