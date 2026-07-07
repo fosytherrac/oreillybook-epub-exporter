@@ -134,6 +134,19 @@
       }
 
       console.log(`Found: ${chapterFiles.length} chapters, ${cssFiles.length} CSS, ${imageFiles.length} images`);
+
+      // Don't produce a valid-but-empty EPUB. If nothing classified as a
+      // chapter, the manifest either used unexpected field names or this isn't
+      // a text book — surface it instead of silently downloading blank content.
+      if (chapterFiles.length === 0) {
+        // Log a sample so we can see the real manifest shape in the console.
+        console.error('No chapters found. Manifest sample:', allFiles.slice(0, 3));
+        throw new Error(
+          `No readable chapters found (manifest had ${allFiles.length} files). ` +
+          `The book may use an unexpected format — open DevTools and check the ` +
+          `"Manifest sample" log to see the file fields.`
+        );
+      }
       if (chapterFiles.length > 100) {
         console.warn(`Large book detected: ${chapterFiles.length} chapters. This may take a while.`);
       }
