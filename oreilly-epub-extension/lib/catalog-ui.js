@@ -54,69 +54,7 @@ const CatalogUI = {
     }
 
     function renderResults(books) {
-      els.results.textContent = '';
-      books.forEach((book) => {
-        const row = document.createElement('div');
-        row.className = 'book-row';
-
-        if (book.coverUrl) {
-          const img = document.createElement('img');
-          img.className = 'book-cover';
-          img.src = book.coverUrl;
-          img.alt = '';
-          img.loading = 'lazy';
-          img.addEventListener('error', () => img.remove());
-          row.appendChild(img);
-        }
-
-        const info = document.createElement('div');
-        info.className = 'book-row-info';
-
-        const title = document.createElement('div');
-        title.className = 'book-row-title';
-        title.textContent = book.title;
-        title.title = book.title;
-        info.appendChild(title);
-
-        if (book.authors && book.authors.length) {
-          const authors = document.createElement('div');
-          authors.className = 'book-row-authors';
-          authors.textContent = book.authors.join(', ');
-          info.appendChild(authors);
-        }
-        if (book.publisher || book.issued) {
-          const meta = document.createElement('div');
-          meta.className = 'book-row-meta';
-          meta.textContent = [book.publisher, book.issued].filter(Boolean).join(' · ');
-          info.appendChild(meta);
-        }
-        row.appendChild(info);
-
-        const actions = document.createElement('div');
-        actions.className = 'book-row-actions';
-
-        const dl = document.createElement('button');
-        dl.className = 'book-row-btn';
-        dl.textContent = '📥';
-        dl.title = book.isbn ? 'Download EPUB' : 'No ISBN available';
-        dl.disabled = !book.isbn;
-        dl.addEventListener('click', () => downloadFromCatalog(book, dl));
-        actions.appendChild(dl);
-
-        if (book.webUrl) {
-          const open = document.createElement('a');
-          open.className = 'book-row-btn';
-          open.textContent = '↗';
-          open.title = 'Open on O\'Reilly';
-          open.href = book.webUrl;
-          open.target = '_blank';
-          open.rel = 'noopener';
-          actions.appendChild(open);
-        }
-        row.appendChild(actions);
-
-        els.results.appendChild(row);
-      });
+      CatalogUI.renderBooks(els.results, books, downloadFromCatalog);
     }
 
     function doBrowse() {
@@ -176,5 +114,73 @@ const CatalogUI = {
     els.btn.addEventListener('click', doBrowse);
     els.query.addEventListener('keydown', (e) => { if (e.key === 'Enter') doBrowse(); });
     els.export.addEventListener('click', exportCsv);
+  },
+
+  // Render book cards into a container (shared by live search and the local
+  // index). onDownload(book, btn) is invoked when a book's 📥 is clicked.
+  renderBooks(container, books, onDownload) {
+    container.textContent = '';
+    books.forEach((book) => {
+      const row = document.createElement('div');
+      row.className = 'book-row';
+
+      if (book.coverUrl) {
+        const img = document.createElement('img');
+        img.className = 'book-cover';
+        img.src = book.coverUrl;
+        img.alt = '';
+        img.loading = 'lazy';
+        img.addEventListener('error', () => img.remove());
+        row.appendChild(img);
+      }
+
+      const info = document.createElement('div');
+      info.className = 'book-row-info';
+
+      const title = document.createElement('div');
+      title.className = 'book-row-title';
+      title.textContent = book.title;
+      title.title = book.title;
+      info.appendChild(title);
+
+      if (book.authors && book.authors.length) {
+        const authors = document.createElement('div');
+        authors.className = 'book-row-authors';
+        authors.textContent = book.authors.join(', ');
+        info.appendChild(authors);
+      }
+      if (book.publisher || book.issued) {
+        const meta = document.createElement('div');
+        meta.className = 'book-row-meta';
+        meta.textContent = [book.publisher, book.issued].filter(Boolean).join(' · ');
+        info.appendChild(meta);
+      }
+      row.appendChild(info);
+
+      const actions = document.createElement('div');
+      actions.className = 'book-row-actions';
+
+      const dl = document.createElement('button');
+      dl.className = 'book-row-btn';
+      dl.textContent = '📥';
+      dl.title = book.isbn ? 'Download EPUB' : 'No ISBN available';
+      dl.disabled = !book.isbn;
+      dl.addEventListener('click', () => onDownload(book, dl));
+      actions.appendChild(dl);
+
+      if (book.webUrl) {
+        const open = document.createElement('a');
+        open.className = 'book-row-btn';
+        open.textContent = '↗';
+        open.title = 'Open on O\'Reilly';
+        open.href = book.webUrl;
+        open.target = '_blank';
+        open.rel = 'noopener';
+        actions.appendChild(open);
+      }
+      row.appendChild(actions);
+
+      container.appendChild(row);
+    });
   },
 };

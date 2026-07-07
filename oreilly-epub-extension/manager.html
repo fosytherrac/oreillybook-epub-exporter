@@ -37,9 +37,28 @@
     <div id="browse-results" class="results"></div>
 
     <p class="hint">
-      Tip: clicking 📥 opens the book's page in a new tab and starts its EPUB
-      export automatically. Downloads run one at a time.
+      Live search hits O'Reilly directly. For instant, offline search over the
+      whole catalog, build or import a local index below.
     </p>
+
+    <!-- Local catalog index: instant, offline search over stored metadata -->
+    <section class="index-panel">
+      <div class="index-head">
+        <div class="index-title">📚 Local catalog index</div>
+        <div id="index-status" class="index-status">No index yet.</div>
+      </div>
+      <div class="index-actions">
+        <button id="btn-build-index" class="btn-secondary" title="Fetch every book's metadata and store it locally for instant search">⚙ Build index (fetch all)</button>
+        <button id="btn-import-index" class="btn-secondary" title="Load a catalog .json you exported earlier">⬆ Import JSON…</button>
+        <input id="file-import" type="file" accept="application/json,.json" style="display:none;">
+        <button id="btn-clear-index" class="btn-secondary" style="display:none;">🗑 Clear</button>
+      </div>
+      <input id="local-search" class="control control-input index-search" type="text"
+             placeholder="Search the local index instantly…" autocomplete="off" disabled>
+      <div id="local-status" class="status"></div>
+      <div id="local-results" class="results"></div>
+      <button id="btn-local-more" class="btn-secondary" style="display:none;">Show more</button>
+    </section>
   </main>
 
   <!-- EPUB engine (order matters: path-utils → fetcher → optimizer/builder → downloader) -->
@@ -51,6 +70,7 @@
   <script src="lib/downloader.js"></script>
   <!-- Catalog UI -->
   <script src="lib/catalog.js"></script>
+  <script src="lib/catalog-store.js"></script>
   <script src="lib/catalog-ui.js"></script>
   <script src="manager.js"></script>
 </body>

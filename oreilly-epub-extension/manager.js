@@ -88,88 +88,82 @@
     return Catalog.parseSearchResponse(json); // { books, total }
   }
 
-  // Export the ENTIRE result set (every page) as a JSON file. This is the fast
-  // path for "give me all the books": page 0 reports the total, so we fetch all
-  // remaining pages concurrently through the adaptive pool and never touch a
-  // single cover image.
+  // Fetch EVERY page of catalog metadata for the current topic/query and return
+  // { books, total, query, topic }. page 0 reports the total, so the remaining
+  // pages are fetched concurrently through the adaptive pool — no cover images.
+  // Shared by the JSON export and the local-index build.
+  async function fetchAllBooks(setStatus) {
+    const topic = document.getElementById('browse-topic').value;
+    const query = document.getElementById('browse-query').value.trim();
+    setStatus('Fetching page 1…');
+    let effTopic = topic, effQuery = query;
+
+    // Probe a large page size; adopt it only if O'Reilly actually returns that
+    // many (otherwise paging by the requested offset could skip records).
+    const PROBE = 500, SAFE = 100;
+    let LIMIT = SAFE;
+    let first = null;
+    try {
+      first = await fetchSearchPage(effTopic, effQuery, 0, PROBE);
+      if (first.books.length === PROBE) LIMIT = PROBE;
+    } catch (e) {
+      if (e.message === 'SESSION_EXPIRED') throw e;
+      first = null;
+    }
+    if (LIMIT === SAFE && (!first || (first.total && first.books.length < first.total))) {
+      first = await fetchSearchPage(effTopic, effQuery, 0, SAFE);
+    }
+    if (first.books.length === 0 && topic && !query) {
+      effTopic = ''; effQuery = topic;
+      first = await fetchSearchPage(effTopic, effQuery, 0, LIMIT);
+    }
+
+    const total = first.total || first.books.length;
+    const totalPages = Math.max(1, Math.ceil(total / LIMIT));
+    const all = [...first.books];
+
+    if (totalPages > 1 && all.length < total) {
+      const pageNums = [];
+      for (let p = 1; p < totalPages; p++) pageNums.push(p);
+      const perPage = await Downloader._adaptivePool(pageNums, async (p, idx, onRateLimit) => {
+        const r = await fetchSearchPage(effTopic, effQuery, p, LIMIT, onRateLimit);
+        return r.books;
+      }, {
+        startC: 6, minC: 1, maxC: 12,
+        onProgress: (done) => setStatus(`Fetching catalog… ${done + 1}/${totalPages} pages (${all.length}+ books)`),
+      });
+      for (const arr of perPage) if (arr) all.push(...arr);
+    }
+
+    const seen = new Set();
+    const books = [];
+    for (const b of all) {
+      const key = b.isbn || b.webUrl || b.title;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      books.push(b);
+    }
+    return { books, total, query, topic };
+  }
+
+  // Export the current query's full result set as a JSON file.
   async function exportAllJson(statusEl) {
     if (busy) return;
     busy = true;
     const setStatus = (t) => { if (statusEl) statusEl.textContent = t; };
     const btn = document.getElementById('btn-export-all');
     if (btn) btn.disabled = true;
-    const topic = document.getElementById('browse-topic').value;
-    const query = document.getElementById('browse-query').value.trim();
-    const label = (query || topic || 'oreilly-catalog')
-      .replace(/[^a-zA-Z0-9\s-]/g, '').replace(/\s+/g, '-').toLowerCase() || 'oreilly-catalog';
-
     try {
-      setStatus('Fetching page 1…');
-      let effTopic = topic, effQuery = query;
-
-      // Probe a large page size; only adopt it if O'Reilly actually returns that
-      // many. If it silently caps (returns fewer while more data exists), paging
-      // by the requested size could skip records — so fall back to a safe 100.
-      const PROBE = 500, SAFE = 100;
-      let LIMIT = SAFE;
-      let first = null;
-      try {
-        first = await fetchSearchPage(effTopic, effQuery, 0, PROBE);
-        if (first.books.length === PROBE) LIMIT = PROBE; // honored → big pages are safe
-      } catch (e) {
-        if (e.message === 'SESSION_EXPIRED') throw e;     // real auth problem
-        first = null;                                     // rejected the big limit
-      }
-      // Re-fetch at the safe size when the probe was capped/rejected AND there's
-      // more data than it returned (i.e. we can't trust page×PROBE offsets).
-      if (LIMIT === SAFE && (!first || (first.total && first.books.length < first.total))) {
-        first = await fetchSearchPage(effTopic, effQuery, 0, SAFE);
-      }
-
-      // Empty-topic-browse fallback: retry using the topic name as the query.
-      if (first.books.length === 0 && topic && !query) {
-        effTopic = ''; effQuery = topic;
-        first = await fetchSearchPage(effTopic, effQuery, 0, LIMIT);
-      }
-
-      const total = first.total || first.books.length;
-      const totalPages = Math.max(1, Math.ceil(total / LIMIT));
-      const all = [...first.books];
-
-      if (totalPages > 1 && all.length < total) {
-        const pageNums = [];
-        for (let p = 1; p < totalPages; p++) pageNums.push(p);
-        const perPage = await Downloader._adaptivePool(pageNums, async (p, idx, onRateLimit) => {
-          const r = await fetchSearchPage(effTopic, effQuery, p, LIMIT, onRateLimit);
-          return r.books;
-        }, {
-          startC: 6, minC: 1, maxC: 12,
-          onProgress: (done) => setStatus(`Fetching catalog… ${done + 1}/${totalPages} pages (${all.length}+ books)`),
-        });
-        for (const arr of perPage) if (arr) all.push(...arr);
-      }
-
-      // Dedupe by ISBN (fall back to URL/title for entries without one).
-      const seen = new Set();
-      const books = [];
-      for (const b of all) {
-        const key = b.isbn || b.webUrl || b.title;
-        if (seen.has(key)) continue;
-        seen.add(key);
-        books.push(b);
-      }
-
+      const { books, total, query, topic } = await fetchAllBooks(setStatus);
+      const label = (query || topic || 'oreilly-catalog')
+        .replace(/[^a-zA-Z0-9\s-]/g, '').replace(/\s+/g, '-').toLowerCase() || 'oreilly-catalog';
       const payload = {
         source: 'learning.oreilly.com',
-        query: query || null,
-        topic: topic || null,
-        total,
-        count: books.length,
-        exported_at: new Date().toISOString(),
-        books,
+        query: query || null, topic: topic || null,
+        total, count: books.length, exported_at: new Date().toISOString(), books,
       };
-      const blob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
-      Downloader.triggerBrowserDownload(blob, `${label}.json`);
+      Downloader.triggerBrowserDownload(
+        new Blob([JSON.stringify(payload)], { type: 'application/json' }), `${label}.json`);
       setStatus(`Exported ${books.length} of ${total} books → ${label}.json`);
     } catch (e) {
       console.error('Catalog export failed:', e);
@@ -182,6 +176,135 @@
     }
   }
 
+  // ---- Local catalog index: instant, offline search over stored metadata ----
+  const LocalIndex = (function () {
+    const els = {
+      status: document.getElementById('index-status'),
+      build: document.getElementById('btn-build-index'),
+      importBtn: document.getElementById('btn-import-index'),
+      file: document.getElementById('file-import'),
+      clear: document.getElementById('btn-clear-index'),
+      search: document.getElementById('local-search'),
+      searchStatus: document.getElementById('local-status'),
+      results: document.getElementById('local-results'),
+      more: document.getElementById('btn-local-more'),
+    };
+    const PAGE = 60;
+    let books = [];      // normalized + a lowercase `_s` search field, title-sorted
+    let filtered = [];
+    let shown = 0;
+    let searchTimer = null;
+
+    const fmtDate = (iso) => { try { return new Date(iso).toLocaleString(); } catch (e) { return iso; } };
+
+    // Normalize an arbitrary imported/fetched record and precompute a search key.
+    function prep(rawBooks) {
+      return rawBooks.map((b) => {
+        const isbn = b.isbn || (b.webUrl ? (String(b.webUrl).match(/(\d{13})/) || [])[1] : null) || null;
+        const authors = Array.isArray(b.authors) ? b.authors : (b.authors ? [b.authors] : []);
+        const o = {
+          isbn,
+          title: b.title || 'Untitled',
+          authors,
+          publisher: b.publisher || '',
+          issued: b.issued || '',
+          coverUrl: b.coverUrl || '',
+          webUrl: b.webUrl || (isbn ? `https://learning.oreilly.com/library/view/-/${isbn}/` : null),
+        };
+        o._s = `${o.title} ${authors.join(' ')} ${o.publisher} ${isbn || ''}`.toLowerCase();
+        return o;
+      }).sort((a, b) => a.title.localeCompare(b.title));
+    }
+
+    function setStored(rawBooks, updatedAt) {
+      books = prep(rawBooks);
+      els.search.disabled = books.length === 0;
+      els.clear.style.display = books.length ? '' : 'none';
+      els.status.textContent = books.length
+        ? `${books.length.toLocaleString()} books indexed${updatedAt ? ' · updated ' + fmtDate(updatedAt) : ''}`
+        : 'No index yet.';
+      runSearch();
+    }
+
+    function render() {
+      const slice = filtered.slice(0, shown);
+      CatalogUI.renderBooks(els.results, slice, inPageDownload);
+      els.more.style.display = filtered.length > shown ? '' : 'none';
+      els.searchStatus.textContent = filtered.length
+        ? `${filtered.length.toLocaleString()} match${filtered.length === 1 ? '' : 'es'} (showing ${slice.length})`
+        : (books.length ? 'No matches.' : '');
+    }
+
+    function runSearch() {
+      const toks = els.search.value.trim().toLowerCase().split(/\s+/).filter(Boolean);
+      filtered = toks.length ? books.filter((b) => toks.every((t) => b._s.includes(t))) : books;
+      shown = PAGE;
+      render();
+    }
+
+    async function persist(rawBooks, m) {
+      const updatedAt = new Date().toISOString();
+      await CatalogStore.save({ books: rawBooks, total: m.total, query: m.query, topic: m.topic, updatedAt });
+      setStored(rawBooks, updatedAt);
+    }
+
+    async function build() {
+      if (busy) return;
+      busy = true;
+      els.build.disabled = true;
+      try {
+        const { books: fetched, total, query, topic } = await fetchAllBooks((t) => { els.status.textContent = t; });
+        await persist(fetched, { total, query, topic });
+      } catch (e) {
+        console.error('Build index failed:', e);
+        els.status.textContent = e.message === 'SESSION_EXPIRED'
+          ? 'Not signed in to O\'Reilly — log in and retry.'
+          : `Build failed: ${e.message}`;
+      } finally {
+        busy = false;
+        els.build.disabled = false;
+      }
+    }
+
+    async function importFile(file) {
+      try {
+        const json = JSON.parse(await file.text());
+        const arr = Array.isArray(json) ? json : (json.books || []);
+        if (!arr.length) { els.status.textContent = 'That file had no books.'; return; }
+        await persist(arr, { total: json.total || arr.length, query: json.query || null, topic: json.topic || null });
+      } catch (e) {
+        console.error('Import failed:', e);
+        els.status.textContent = `Import failed: ${e.message}`;
+      }
+    }
+
+    async function clear() {
+      try { await CatalogStore.clear(); } catch (e) { /* ignore */ }
+      books = []; filtered = []; shown = 0;
+      els.search.value = ''; els.search.disabled = true;
+      els.clear.style.display = 'none';
+      els.results.textContent = ''; els.searchStatus.textContent = '';
+      els.more.style.display = 'none';
+      els.status.textContent = 'No index yet.';
+    }
+
+    els.build.addEventListener('click', build);
+    els.importBtn.addEventListener('click', () => els.file.click());
+    els.file.addEventListener('change', () => { if (els.file.files[0]) importFile(els.file.files[0]); els.file.value = ''; });
+    els.clear.addEventListener('click', clear);
+    els.search.addEventListener('input', () => { clearTimeout(searchTimer); searchTimer = setTimeout(runSearch, 120); });
+    els.more.addEventListener('click', () => { shown += PAGE; render(); });
+
+    return {
+      async load() {
+        try {
+          const rec = await CatalogStore.load();
+          if (rec && Array.isArray(rec.books)) setStored(rec.books, rec.updatedAt);
+        } catch (e) { console.warn('Index load failed:', e); }
+      },
+    };
+  })();
+
   CatalogUI.init({
     topic: document.getElementById('browse-topic'),
     query: document.getElementById('browse-query'),
@@ -193,4 +316,6 @@
 
   document.getElementById('btn-export-all')
     .addEventListener('click', () => exportAllJson(document.getElementById('browse-status')));
+
+  LocalIndex.load();
 })();
