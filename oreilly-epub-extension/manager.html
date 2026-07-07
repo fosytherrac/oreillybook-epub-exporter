@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>O'Reilly → EPUB — Catalog</title>
+  <link rel="stylesheet" href="manager.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">O</div>
+      <span class="title">O'Reilly → EPUB</span>
+    </div>
+    <div class="tagline">Browse the O'Reilly catalog by category and export books to EPUB</div>
+  </header>
+
+  <main class="wrap">
+    <section class="controls">
+      <select id="browse-topic" class="control control-select">
+        <option value="">All categories</option>
+      </select>
+      <input id="browse-query" class="control control-input" type="text"
+             placeholder="or type a search term…" autocomplete="off">
+      <button id="btn-browse" class="control btn-primary">List books</button>
+      <button id="btn-export" class="control btn-secondary" style="display:none;">⬇ Export CSV</button>
+    </section>
+
+    <div id="browse-status" class="status"></div>
+    <div id="browse-results" class="results"></div>
+
+    <p class="hint">
+      Tip: clicking 📥 opens the book's page in a new tab and starts its EPUB
+      export automatically. Downloads run one at a time.
+    </p>
+  </main>
+
+  <script src="lib/catalog.js"></script>
+  <script src="lib/catalog-ui.js"></script>
+  <script src="manager.js"></script>
+</body>
+</html>

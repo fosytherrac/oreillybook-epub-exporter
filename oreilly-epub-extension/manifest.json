@@ -20,6 +20,10 @@
       "128": "icons/icon128.png"
     }
   },
+  "options_ui": {
+    "page": "manager.html",
+    "open_in_tab": true
+  },
   "content_scripts": [{
     "matches": [
       "https://learning.oreilly.com/library/view/*",

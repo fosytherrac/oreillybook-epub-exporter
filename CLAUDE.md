@@ -37,7 +37,8 @@ Popup (UI) ←→ Service Worker (relay/state) ←→ Content Script (all work)
 
 - **Content script** (`content.js`) — the workhorse. Runs on `learning.oreilly.com`, does all fetching, parsing, and EPUB assembly. Same-origin context means session cookies are included automatically.
 - **Service worker** (`background.js`) — relay + CORS proxy. Forwards messages, updates badge, persists state via `chrome.storage.session` (survives MV3 service worker termination). Also acts as a CORS proxy for CDN images (`fetchImage` handler fetches in SW context, returns base64).
-- **Popup** (`popup.html/js/css`) — pure UI. Queries service worker for state, displays it, sends commands.
+- **Popup** (`popup.html/js/css`) — pure UI. Queries service worker for state, displays it, sends commands. The ⤢ header button opens the full-page manager.
+- **Full-page manager** (`manager.html/js/css`) — a roomy catalog browser opened in its own tab (also registered as the extension's `options_ui`). Shares the catalog-browsing logic with the popup via `lib/catalog-ui.js`; only the layout (a responsive grid of cards) differs, in CSS.
 
 ### Library Modules (loaded as content scripts, not ES modules)
 
@@ -47,6 +48,7 @@ All expose global objects (`Fetcher`, `EpubBuilder`, `EinkOptimizer`) — no imp
 - `lib/epub-builder.js` — Generates EPUB structural files (content.opf, toc.xhtml, toc.ncx, container.xml, cover.xhtml). Pure string generation, no side effects.
 - `lib/eink-optimizer.js` — Rewrites chapter XHTML via DOM manipulation (DOMParser + XMLSerializer): injects e-ink CSS override, remaps image paths to `../Images/`, rewrites CSS links to `../Styles/`. Uses `Fetcher.parseXhtml()` for robust parsing. Serializes back via `XMLSerializer` to avoid HTML entity mismatches.
 - `lib/catalog.js` — Pure helpers for the catalog search API: `buildSearchUrl()`, `parseSearchResponse()`, `normalizeBook()`, `extractIsbn()` (defensive — reads `isbn`/`archive_id`/`identifier` or an ISBN embedded in a URL), `nextUrlFromResponse()`, and a `TOPICS` list of common categories. No fetching — `background.js` does the paging. Unlike the other lib modules it is **not** a content script; the SW pulls it in with `importScripts('lib/catalog.js')` (guarded by `typeof importScripts === 'function'` so the test runner, which loads it via `<script>`, doesn't break), and the popup loads it with a `<script>` tag.
+- `lib/catalog-ui.js` — Shared catalog-browser UI factory (`CatalogUI.init(els, opts)`): wires search, result rendering, per-book download, and CSV export onto a given set of DOM elements. Used by both `popup.js` and `manager.js` so the browsing logic lives in one place; the two pages differ only in CSS layout. Emits identical `.book-row` markup. Not a content script — loaded via `<script>` in the popup and manager pages.
 - `lib/jszip.min.js` — Third-party EPUB packaging.
 
 ### Key Implementation Details
