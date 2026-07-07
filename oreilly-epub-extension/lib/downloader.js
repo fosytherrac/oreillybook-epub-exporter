@@ -128,12 +128,14 @@ const Downloader = {
       if (collectPdf) pdfImages[name] = { buffer, mime: mime || EpubBuilder._mimeType(name) };
     };
 
-    // Fetch pacing: start fast; only back off if O'Reilly actually returns a
-    // 403/429. (The old fixed 500ms/1000ms delays assumed a rate limit we never
-    // measured.) Fetcher's per-request retry/backoff remains the safety net;
-    // onRateLimit just flips us into a gentler cadence for the rest of the run.
+    // Fetch pacing: start fast; the moment O'Reilly returns a 403/429 (observed
+    // to happen on concurrent bursts), drop to a gentle cadence for the rest of
+    // the run — smaller batches AND a pause between them — so we stop
+    // re-triggering the limit. Fetcher's per-request retry/backoff is the safety
+    // net that recovers the individual rejected requests.
     const IMAGE_CONCURRENCY = 8;
     const CHAPTER_CONCURRENCY = 5;
+    const SLOW_CONCURRENCY = 2;
     const THROTTLED_BATCH_DELAY = 1500;
     let throttled = false;
     const onRateLimit = () => { throttled = true; };
@@ -211,11 +213,14 @@ const Downloader = {
     const imageMap = {};
     let downloadedImageCount = 0;
 
-    for (let i = 0; i < imageFiles.length; i += IMAGE_CONCURRENCY) {
+    let imgIdx = 0;
+    while (imgIdx < imageFiles.length) {
       if (signal && signal.aborted) throw new DOMException('Aborted', 'AbortError');
-      if (throttled && i > 0) await new Promise(r => setTimeout(r, THROTTLED_BATCH_DELAY));
+      if (throttled && imgIdx > 0) await new Promise(r => setTimeout(r, THROTTLED_BATCH_DELAY));
 
-      const batch = imageFiles.slice(i, i + IMAGE_CONCURRENCY);
+      const size = throttled ? SLOW_CONCURRENCY : IMAGE_CONCURRENCY;
+      const batch = imageFiles.slice(imgIdx, imgIdx + size);
+      imgIdx += size;
       await Promise.all(batch.map(async (imgFile) => {
         const normalizedPath = PathUtils.normalizePath(imgFile.path);
         const rawFilename = Fetcher.stripQueryAndHash(normalizedPath.split('/').pop());
@@ -237,11 +242,15 @@ const Downloader = {
     const chapters = [];
     let completedChapters = 0;
 
-    for (let i = 0; i < chapterFiles.length; i += CHAPTER_CONCURRENCY) {
+    let chIdx = 0;
+    while (chIdx < chapterFiles.length) {
       if (signal && signal.aborted) throw new DOMException('Aborted', 'AbortError');
-      if (throttled && i > 0) await new Promise(r => setTimeout(r, THROTTLED_BATCH_DELAY));
+      if (throttled && chIdx > 0) await new Promise(r => setTimeout(r, THROTTLED_BATCH_DELAY));
 
-      const batch = chapterFiles.slice(i, i + CHAPTER_CONCURRENCY);
+      const size = throttled ? SLOW_CONCURRENCY : CHAPTER_CONCURRENCY;
+      const i = chIdx;
+      const batch = chapterFiles.slice(chIdx, chIdx + size);
+      chIdx += size;
       const batchContents = await Promise.all(
         batch.map(async (chapterFile) => {
           try {
