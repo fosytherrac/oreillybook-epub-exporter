@@ -128,6 +128,16 @@ const Downloader = {
       if (collectPdf) pdfImages[name] = { buffer, mime: mime || EpubBuilder._mimeType(name) };
     };
 
+    // Fetch pacing: start fast; only back off if O'Reilly actually returns a
+    // 403/429. (The old fixed 500ms/1000ms delays assumed a rate limit we never
+    // measured.) Fetcher's per-request retry/backoff remains the safety net;
+    // onRateLimit just flips us into a gentler cadence for the rest of the run.
+    const IMAGE_CONCURRENCY = 8;
+    const CHAPTER_CONCURRENCY = 5;
+    const THROTTLED_BATCH_DELAY = 1500;
+    let throttled = false;
+    const onRateLimit = () => { throttled = true; };
+
     // Load + classify the manifest, retrying while it comes back empty. A
     // just-opened reader session can briefly return an empty manifest; trusting
     // the first response produced blank EPUBs. Real fetch errors propagate.
@@ -165,7 +175,7 @@ const Downloader = {
     const cssImageMap = {};
     for (const cssFile of cssFiles) {
       try {
-        const res = await Fetcher._fetchWithRetry(cssFile.url, { signal });
+        const res = await Fetcher._fetchWithRetry(cssFile.url, { signal, onRateLimit });
         let cssText = await res.text();
         const filename = uniqueFilename(cssFile.path.split('/').pop());
         cssFilenames.push(filename);
@@ -179,7 +189,7 @@ const Downloader = {
           const imgName = uniqueFilename(Fetcher.stripQueryAndHash(cleanUrl.split('/').pop()));
           const apiUrl = `${apiBase}/api/v2/epubs/urn:orm:book:${isbn}/files/${Fetcher.stripQueryAndHash(resolvedPath)}`;
           try {
-            const imgRes = await Fetcher._fetchWithRetry(apiUrl, { signal });
+            const imgRes = await Fetcher._fetchWithRetry(apiUrl, { signal, onRateLimit });
             putImage(imgName, await imgRes.arrayBuffer());
             cssImageMap[cssImgUrl] = imgName;
           } catch (e) {
@@ -201,17 +211,17 @@ const Downloader = {
     const imageMap = {};
     let downloadedImageCount = 0;
 
-    for (let i = 0; i < imageFiles.length; i += 2) {
+    for (let i = 0; i < imageFiles.length; i += IMAGE_CONCURRENCY) {
       if (signal && signal.aborted) throw new DOMException('Aborted', 'AbortError');
-      if (i > 0) await new Promise(r => setTimeout(r, 500));
+      if (throttled && i > 0) await new Promise(r => setTimeout(r, THROTTLED_BATCH_DELAY));
 
-      const batch = imageFiles.slice(i, i + 2);
+      const batch = imageFiles.slice(i, i + IMAGE_CONCURRENCY);
       await Promise.all(batch.map(async (imgFile) => {
         const normalizedPath = PathUtils.normalizePath(imgFile.path);
         const rawFilename = Fetcher.stripQueryAndHash(normalizedPath.split('/').pop());
         const imgFilename = uniqueFilename(rawFilename);
         try {
-          const res = await Fetcher._fetchWithRetry(imgFile.url, { signal });
+          const res = await Fetcher._fetchWithRetry(imgFile.url, { signal, onRateLimit });
           putImage(imgFilename, await res.arrayBuffer(), imgFile.mediaType);
           manifestImageMap[normalizedPath] = imgFilename;
           downloadedImageCount++;
@@ -227,15 +237,15 @@ const Downloader = {
     const chapters = [];
     let completedChapters = 0;
 
-    for (let i = 0; i < chapterFiles.length; i += 2) {
+    for (let i = 0; i < chapterFiles.length; i += CHAPTER_CONCURRENCY) {
       if (signal && signal.aborted) throw new DOMException('Aborted', 'AbortError');
-      if (i > 0) await new Promise(r => setTimeout(r, 1000));
+      if (throttled && i > 0) await new Promise(r => setTimeout(r, THROTTLED_BATCH_DELAY));
 
-      const batch = chapterFiles.slice(i, i + 2);
+      const batch = chapterFiles.slice(i, i + CHAPTER_CONCURRENCY);
       const batchContents = await Promise.all(
         batch.map(async (chapterFile) => {
           try {
-            const res = await Fetcher._fetchWithRetry(chapterFile.url, { signal });
+            const res = await Fetcher._fetchWithRetry(chapterFile.url, { signal, onRateLimit });
             return await res.text();
           } catch (err) {
             if (err.name === 'AbortError' || err.message === 'SESSION_EXPIRED') throw err;
@@ -309,7 +319,7 @@ const Downloader = {
             const cleanResolved = Fetcher.stripQueryAndHash(normalizedResolved);
             const apiUrl = `${apiBase}/api/v2/epubs/urn:orm:book:${isbn}/files/${cleanResolved}`;
             try {
-              const imgRes = await Fetcher._fetchWithRetry(apiUrl, { signal });
+              const imgRes = await Fetcher._fetchWithRetry(apiUrl, { signal, onRateLimit });
               putImage(imgFilename, await imgRes.arrayBuffer());
               imageMap[imgSrc] = imgFilename;
               chapterImageMap[imgSrc] = imgFilename;

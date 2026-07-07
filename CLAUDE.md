@@ -62,7 +62,7 @@ All expose global objects (`Fetcher`, `EpubBuilder`, `EinkOptimizer`) — no imp
 - **Four-strategy image fallback** (in `content.js`): (1) Match resolved path against pre-downloaded manifest images, (2) Match by filename only, (3) Fetch via O'Reilly API (relative URLs), (4) Fetch via background SW CORS proxy (absolute CDN URLs only).
 - **CSS background images** are also extracted and downloaded from stylesheets via `Fetcher.extractCssImageUrls()`.
 - **MV3 state persistence**: `chrome.storage.session` ensures popup state survives service worker termination (MV3 terminates idle SWs after ~30s).
-- **Chapters fetched in batches of 2** with 1s delay between batches to avoid 403 rate limiting.
+- **Adaptive fetch pacing**: images and chapters are fetched concurrently (8 / 5 at a time) with **no fixed delay** — the extension starts fast and only inserts a per-batch pause after it actually observes a 403/429 (via `onRateLimit` from `Fetcher._fetchWithRetry`, which flips a `throttled` flag). The per-request retry/backoff in `fetcher.js` remains the safety net. (Earlier versions used fixed batches-of-2 + 500ms/1000ms delays that assumed an unmeasured rate limit.)
 - **`mimetype` must be the first ZIP entry** with `{compression: 'STORE'}` per EPUB spec.
 - **EPUB includes both EPUB 3 nav (`toc.xhtml`) and EPUB 2 NCX (`toc.ncx`)** for Boox reader compatibility.
 - **Query/hash stripping**: Image URLs with `?v=123` or `#fragment` are cleaned before API requests to avoid 404s.

@@ -4,7 +4,7 @@ const Fetcher = {
     return match ? match[1] : null;
   },
 
-  async _fetchWithRetry(url, { signal, maxRetries = 3 } = {}) {
+  async _fetchWithRetry(url, { signal, maxRetries = 3, onRateLimit } = {}) {
     const delays = [1000, 3000, 9000];
     let attempt = 0;
     let rateLimitRetries = 0;
@@ -13,6 +13,7 @@ const Fetcher = {
       try {
         const response = await fetch(url, { signal, credentials: 'include' });
         if (response.status === 429 || response.status === 403) {
+          if (onRateLimit) onRateLimit(response.status); // let callers slow down
           rateLimitRetries++;
           if (rateLimitRetries > maxRateLimitRetries) throw new Error('Rate limit exceeded');
           const retryAfter = response.headers.get('Retry-After');
