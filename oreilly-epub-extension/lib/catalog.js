@@ -86,10 +86,16 @@ const Catalog = {
   // Convert one raw API record into the shape the UI consumes.
   normalizeBook(book) {
     const isbn = this.extractIsbn(book);
-    const webUrl =
+    let webUrl =
       book.web_url ||
       book.url ||
       (isbn ? `https://learning.oreilly.com/library/view/-/${isbn}/` : null);
+    // The API often returns a site-relative path (e.g. /library/view/...).
+    // Make it absolute so it opens on learning.oreilly.com rather than being
+    // resolved against the extension/page origin.
+    if (webUrl && webUrl.startsWith('/')) {
+      webUrl = `https://learning.oreilly.com${webUrl}`;
+    }
     const publishers = book.publishers || book.publisher;
     return {
       isbn,

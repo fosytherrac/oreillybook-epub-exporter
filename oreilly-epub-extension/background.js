@@ -192,8 +192,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         // EPUB assembly needs a page context (DOMParser), so it must run in a
         // content script — the SW cannot build the EPUB itself.
         const isbn = message.isbn;
-        const url = message.webUrl ||
+        let url = message.webUrl ||
           (isbn ? `https://learning.oreilly.com/library/view/-/${isbn}/` : null);
+        // Guard against a site-relative URL, which chrome.tabs.create would
+        // otherwise resolve against the chrome-extension:// origin.
+        if (url && url.startsWith('/')) url = `${OREILLY_ORIGIN}${url}`;
         if (!isbn || !url) {
           sendResponse({ ok: false, reason: 'no_isbn' });
           return;

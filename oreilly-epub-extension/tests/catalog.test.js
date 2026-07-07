@@ -60,6 +60,14 @@ describe('Catalog.normalizeBook', function() {
     const b = Catalog.normalizeBook({ title: 'X', isbn: '9781000000000', authors: [{ name: 'Jane Doe' }] });
     assertEqual(b.authors[0], 'Jane Doe');
   });
+  it('absolutizes a site-relative web_url', function() {
+    const b = Catalog.normalizeBook({
+      title: 'Ansible: Up and Running',
+      isbn: '9781098109141',
+      web_url: '/library/view/ansible-up-and/9781098109141/',
+    });
+    assertEqual(b.webUrl, 'https://learning.oreilly.com/library/view/ansible-up-and/9781098109141/');
+  });
   it('derives a web URL from the isbn when none is given', function() {
     const b = Catalog.normalizeBook({ title: 'X', isbn: '9781234567897' });
     assertEqual(b.webUrl, 'https://learning.oreilly.com/library/view/-/9781234567897/');
