@@ -1,128 +1,46 @@
-/* E-Ink Override — injected into every chapter for e-ink-friendly rendering.
-   Goals: readable typography, images that fit the page (never overflow or
-   stretch), and code blocks that wrap instead of clipping. */
+/* Light-touch fixes injected into every chapter.
+   Deliberately minimal: this preserves O'Reilly's own stylesheet (fonts,
+   colors, code highlighting, layout) and only corrects things that break in
+   a standalone EPUB — images overflowing the page and code/tables clipping.
+   It does NOT restyle text, so chapters look close to the original. */
 
-html, body {
-  margin: 0;
-  padding: 0;
-}
-
-body {
-  font-family: Georgia, "Times New Roman", serif;
-  line-height: 1.6;
-  margin: 1em 1.2em !important;
-  padding: 0 !important;
-  color: #000;
-  background: #fff;
-  text-align: left;
-  word-wrap: break-word;
-  overflow-wrap: break-word;
-}
-
-/* Keep block containers within the page width without collapsing layout */
-div, section, article, main, p, ul, ol, dl, table {
-  max-width: 100%;
+* {
   box-sizing: border-box;
 }
 
-/* Headings: clear hierarchy, avoid orphaned headings at page bottom */
-h1, h2, h3, h4, h5, h6 {
-  font-family: Georgia, "Times New Roman", serif;
-  line-height: 1.25;
-  page-break-after: avoid;
-  break-after: avoid;
-  margin: 1em 0 0.4em;
-}
-h1 { font-size: 1.6em; }
-h2 { font-size: 1.35em; }
-h3 { font-size: 1.15em; }
-
-/* Images: fit BOTH page width and height, stay centered, keep aspect ratio.
+/* Images fit BOTH page width and height, keep aspect ratio, never overflow.
    Covers <img>, inline SVG, and O'Reilly's <svg><image> figure wrappers. */
-img, svg, image, object[type^="image"] {
+img, svg, image {
   max-width: 100% !important;
   max-height: 96vh !important;
-  width: auto !important;
-  height: auto !important;
-  object-fit: contain;
+  height: auto;
 }
 
-/* Block-level figure images get centered with spacing; small inline images
-   (icons, math glyphs) inside text keep their natural flow. */
-figure img, p > img:only-child, div > img:only-child,
-.figure img, .informalfigure img {
-  display: block;
-  margin: 0.6em auto;
-}
-
+/* Center block figure images and give them a little breathing room */
 figure, .figure, .informalfigure {
-  margin: 1em 0 !important;
-  padding: 0;
-  text-align: center;
+  max-width: 100%;
+  margin: 1em 0;
   page-break-inside: avoid;
   break-inside: avoid;
 }
-
-figcaption, .caption {
-  font-size: 0.9em;
-  font-style: italic;
-  text-align: center;
-  margin-top: 0.4em;
+figure img, .figure img, .informalfigure img {
+  display: block;
+  margin: 0.5em auto;
 }
 
-/* Tables: keep inside the page and let cell text wrap rather than overflow */
-table {
-  border-collapse: collapse;
-  max-width: 100%;
-  table-layout: fixed;
-}
-th, td {
-  border: 1px solid #999;
-  padding: 0.3em 0.5em;
-  text-align: left;
-  vertical-align: top;
-  word-wrap: break-word;
-  overflow-wrap: break-word;
-}
-
-/* Code: monochrome, wrapped so long lines never clip on a narrow screen */
-pre, code, kbd, samp {
-  font-family: "DejaVu Sans Mono", "Courier New", Courier, monospace;
-}
+/* Code blocks: wrap long lines instead of clipping on a narrow screen */
 pre {
-  background: #f5f5f5;
-  border: 1px solid #ccc;
-  border-radius: 3px;
-  line-height: 1.4;
-  padding: 0.7em 0.8em;
   white-space: pre-wrap;
   word-wrap: break-word;
   overflow-wrap: break-word;
   max-width: 100%;
-  page-break-inside: avoid;
-  break-inside: avoid;
 }
-code { background: #f5f5f5; padding: 0.05em 0.3em; border-radius: 2px; }
-pre code { background: transparent; padding: 0; border: 0; }
 
-/* Reset syntax-highlight colors to monochrome for e-ink legibility */
-pre span, code span, [class*="hljs-"], [class*="token"] {
-  color: #000 !important;
-  background: transparent !important;
+/* Wide tables stay within the page and let their text wrap */
+table {
+  max-width: 100%;
 }
-.keyword, .hljs-keyword, .hljs-built_in, .hljs-type,
-.token.keyword, .token.builtin { font-weight: bold !important; }
-.string, .hljs-string, .hljs-regexp,
-.token.string, .token.regex { font-style: italic !important; }
-.comment, .hljs-comment, .hljs-meta,
-.token.comment { font-style: italic !important; color: #555 !important; }
-.function, .hljs-title, .hljs-function,
-.token.function { font-weight: bold !important; }
-
-/* Blockquotes and notes/admonitions O'Reilly uses */
-blockquote, .note, .tip, .warning, .caution, .sidebar {
-  margin: 1em 0;
-  padding: 0.5em 0.9em;
-  border-left: 3px solid #999;
-  background: #f7f7f7;
+td, th {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
 }
