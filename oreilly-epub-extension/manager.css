@@ -63,6 +63,8 @@ body {
 .btn-primary:disabled { opacity: 0.6; cursor: default; }
 .btn-secondary { padding: 0 16px; background: var(--panel); color: var(--text); border: 1px solid var(--border); font-weight: 600; cursor: pointer; }
 .btn-secondary:hover { border-color: var(--accent); }
+.format-toggle { display: inline-flex; align-items: center; gap: 6px; height: 40px; padding: 0 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--muted); font-size: 12px; }
+.format-select { border: none; background: transparent; color: var(--text); font-size: 14px; font-weight: 600; cursor: pointer; }
 
 .status { color: var(--muted); font-size: 13px; margin: 8px 0 14px; min-height: 18px; }
 

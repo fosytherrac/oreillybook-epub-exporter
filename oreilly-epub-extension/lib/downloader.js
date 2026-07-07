@@ -106,10 +106,27 @@ const Downloader = {
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   },
 
-  // Build an EPUB for `isbn`. Returns { blob, filename, title }.
-  // opts: { isbn, apiBase='', signal, onProgress, fallbackTitle }
-  async download({ isbn, apiBase = '', signal, onProgress = () => {}, fallbackTitle = '' }) {
+  // Build a book for `isbn`.
+  //   format 'epub' (default) → returns { blob, filename, title }
+  //   format 'pdf'            → returns { html, title } — a single print-ready
+  //                             HTML document with all assets inlined, which the
+  //                             caller prints to PDF via the browser.
+  // opts: { isbn, apiBase='', signal, onProgress, fallbackTitle, format }
+  async download({ isbn, apiBase = '', signal, onProgress = () => {}, fallbackTitle = '', format = 'epub' }) {
     const zip = new JSZip();
+
+    // PDF collection: alongside the ZIP writes we keep image bytes, CSS text,
+    // and processed chapter HTML so we can assemble one inlined document. All of
+    // this is inert when format==='epub'.
+    const collectPdf = format === 'pdf';
+    const pdfImages = {};   // zip filename -> { buffer, mime }
+    const cssTexts = [];    // publisher CSS (url() already rewritten to ../Images/)
+    const chapterHtmls = []; // { title, xhtml } in reading order
+    let einkCss = '';
+    const putImage = (name, buffer, mime) => {
+      zip.file(`OEBPS/Images/${name}`, buffer);
+      if (collectPdf) pdfImages[name] = { buffer, mime: mime || EpubBuilder._mimeType(name) };
+    };
 
     // Load + classify the manifest, retrying while it comes back empty. A
     // just-opened reader session can briefly return an empty manifest; trusting
@@ -139,7 +156,8 @@ const Downloader = {
     zip.file('META-INF/container.xml', EpubBuilder.generateContainer());
 
     const einkRes = await fetch(chrome.runtime.getURL('styles/eink-override.css'));
-    zip.file('OEBPS/Styles/eink-override.css', await einkRes.text());
+    einkCss = await einkRes.text();
+    zip.file('OEBPS/Styles/eink-override.css', einkCss);
 
     const uniqueFilename = PathUtils.createUniqueNamer();
 
@@ -162,7 +180,7 @@ const Downloader = {
           const apiUrl = `${apiBase}/api/v2/epubs/urn:orm:book:${isbn}/files/${Fetcher.stripQueryAndHash(resolvedPath)}`;
           try {
             const imgRes = await Fetcher._fetchWithRetry(apiUrl, { signal });
-            zip.file(`OEBPS/Images/${imgName}`, await imgRes.arrayBuffer());
+            putImage(imgName, await imgRes.arrayBuffer());
             cssImageMap[cssImgUrl] = imgName;
           } catch (e) {
             console.warn(`CSS background image fetch failed: ${cssImgUrl}`, e);
@@ -173,6 +191,7 @@ const Downloader = {
           cssText = cssText.split(original).join(`../Images/${newName}`);
         }
         zip.file(`OEBPS/Styles/${filename}`, cssText);
+        if (collectPdf) cssTexts.push(cssText);
       } catch (e) { console.warn(`CSS fetch failed: ${cssFile.path}`, e); }
     }
 
@@ -193,7 +212,7 @@ const Downloader = {
         const imgFilename = uniqueFilename(rawFilename);
         try {
           const res = await Fetcher._fetchWithRetry(imgFile.url, { signal });
-          zip.file(`OEBPS/Images/${imgFilename}`, await res.arrayBuffer());
+          putImage(imgFilename, await res.arrayBuffer(), imgFile.mediaType);
           manifestImageMap[normalizedPath] = imgFilename;
           downloadedImageCount++;
         } catch (e) {
@@ -241,6 +260,7 @@ const Downloader = {
 </html>`;
           zip.file(`OEBPS/Text/${filename}`, placeholder);
           chapters.push({ filename, title: `Chapter ${chapterNum} (unavailable)` });
+          if (collectPdf) chapterHtmls.push({ title: `Chapter ${chapterNum} (unavailable)`, xhtml: placeholder });
           completedChapters++;
           continue;
         }
@@ -290,7 +310,7 @@ const Downloader = {
             const apiUrl = `${apiBase}/api/v2/epubs/urn:orm:book:${isbn}/files/${cleanResolved}`;
             try {
               const imgRes = await Fetcher._fetchWithRetry(apiUrl, { signal });
-              zip.file(`OEBPS/Images/${imgFilename}`, await imgRes.arrayBuffer());
+              putImage(imgFilename, await imgRes.arrayBuffer());
               imageMap[imgSrc] = imgFilename;
               chapterImageMap[imgSrc] = imgFilename;
               downloadedImageCount++;
@@ -304,7 +324,7 @@ const Downloader = {
           if (isAbsolute) {
             try {
               const buffer = await this._fetchImageViaBackground(resolved);
-              zip.file(`OEBPS/Images/${imgFilename}`, buffer);
+              putImage(imgFilename, buffer);
               imageMap[imgSrc] = imgFilename;
               chapterImageMap[imgSrc] = imgFilename;
               downloadedImageCount++;
@@ -319,6 +339,7 @@ const Downloader = {
         xhtml = EinkOptimizer.processChapter(xhtml, chapterImageMap);
         zip.file(`OEBPS/Text/${filename}`, xhtml);
         chapters.push({ filename, title: chapterTitle });
+        if (collectPdf) chapterHtmls.push({ title: chapterTitle, xhtml });
 
         completedChapters++;
         onProgress({ chapter: completedChapters, totalChapters, images: downloadedImageCount, totalImages: imageFiles.length });
@@ -343,6 +364,15 @@ const Downloader = {
     ])];
 
     const coverImage = EpubBuilder.findCoverImage(allImageFiles);
+
+    // PDF path: assemble one inlined HTML document and hand it back for printing.
+    if (collectPdf) {
+      const html = this._assemblePrintHtml({
+        bookTitle, authors, chapterHtmls, cssTexts, einkCss, pdfImages, coverImage,
+      });
+      return { html, title: bookTitle };
+    }
+
     if (coverImage) {
       zip.file('OEBPS/Text/cover.xhtml', EpubBuilder.generateCoverXhtml(bookTitle, coverImage));
       chapters.unshift({ filename: 'cover.xhtml', title: 'Cover' });
@@ -355,5 +385,73 @@ const Downloader = {
     const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/epub+zip' });
     const sanitizedTitle = bookTitle.replace(/[^a-zA-Z0-9\s-]/g, '').replace(/\s+/g, '-').toLowerCase() || `book-${isbn}`;
     return { blob, filename: `${sanitizedTitle}.epub`, title: bookTitle };
+  },
+
+  // Base64 data: URL from an ArrayBuffer (chunked to avoid arg-count limits).
+  _toDataUrl(buffer, mime) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    const CHUNK = 0x8000;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+    }
+    return `data:${mime || 'application/octet-stream'};base64,${btoa(binary)}`;
+  },
+
+  // Escape a string for safe use in an HTML text/attribute context.
+  _escapeHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  },
+
+  // Build a single self-contained HTML document for printing to PDF. Images are
+  // inlined as data: URLs; the publisher CSS (+ our light overrides) is inlined;
+  // each chapter is a page-breaking section. No scripts (extension-page CSP).
+  _assemblePrintHtml({ bookTitle, authors, chapterHtmls, cssTexts, einkCss, pdfImages, coverImage }) {
+    // Replace every ../Images/<name> reference with its data: URL.
+    const inlineImages = (text) => text.replace(
+      /\.\.\/Images\/([A-Za-z0-9._%\-]+)/g,
+      (m, name) => {
+        const img = pdfImages[name];
+        return img ? this._toDataUrl(img.buffer, img.mime) : m;
+      }
+    );
+
+    let combinedCss = inlineImages([...cssTexts, einkCss].join('\n'));
+
+    const printCss = `
+/* print/pdf assembly */
+@page { margin: 1.4cm; }
+html, body { margin: 0; padding: 0; }
+.chapter { break-after: page; page-break-after: always; }
+.chapter:last-child { break-after: auto; page-break-after: auto; }
+.chapter.cover { text-align: center; }
+.chapter.cover img { max-height: 95vh; }
+img, svg { max-width: 100%; height: auto; }
+`;
+
+    const sections = [];
+    if (coverImage && pdfImages[coverImage]) {
+      const src = this._toDataUrl(pdfImages[coverImage].buffer, pdfImages[coverImage].mime);
+      sections.push(`<section class="chapter cover"><img src="${src}" alt=""/></section>`);
+    }
+    for (const ch of chapterHtmls) {
+      const doc = Fetcher.parseXhtml(ch.xhtml);
+      const bodyInner = doc && doc.body ? doc.body.innerHTML : '';
+      sections.push(`<section class="chapter">${inlineImages(bodyInner)}</section>`);
+    }
+
+    return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>${this._escapeHtml(bookTitle)}</title>
+<meta name="author" content="${this._escapeHtml((authors || []).join(', '))}"/>
+<style>${combinedCss}${printCss}</style>
+</head>
+<body>
+${sections.join('\n')}
+</body>
+</html>`;
   },
 };
