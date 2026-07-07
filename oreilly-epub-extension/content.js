@@ -81,6 +81,50 @@
     });
   }
 
+  // Fetch every page of a book's file manifest (the API is paginated).
+  async function loadManifest(isbn, signal) {
+    const allFiles = [];
+    let nextUrl = `/api/v2/epubs/urn:orm:book:${isbn}/files/?limit=200`;
+    while (nextUrl) {
+      const filesRes = await fetch(nextUrl, { credentials: 'include', signal });
+      if (filesRes.status === 401) throw new Error('SESSION_EXPIRED');
+      if (!filesRes.ok) throw new Error(`Manifest fetch failed: ${filesRes.status}`);
+      const filesData = await filesRes.json();
+      const results = filesData.results || filesData;
+      allFiles.push(...(Array.isArray(results) ? results : []));
+      // Follow pagination; convert absolute URL to relative path
+      if (filesData.next) {
+        const u = new URL(filesData.next);
+        nextUrl = u.pathname + u.search;
+      } else {
+        nextUrl = null;
+      }
+    }
+    return allFiles;
+  }
+
+  // Split a manifest into chapter / CSS / image buckets.
+  function classifyFiles(isbn, allFiles) {
+    const chapterFiles = [];
+    const cssFiles = [];
+    const imageFiles = [];
+    for (const file of allFiles) {
+      const path = file.full_path || file.filename || '';
+      const kind = file.kind || '';
+      const mediaType = file.media_type || '';
+      const contentUrl = `/api/v2/epubs/urn:orm:book:${isbn}/files/${path}`;
+
+      if (kind === 'chapter' || mediaType === 'text/html' || mediaType === 'application/xhtml+xml') {
+        chapterFiles.push({ path, url: contentUrl });
+      } else if (mediaType === 'text/css' || path.match(/\.css$/i)) {
+        cssFiles.push({ path, url: contentUrl });
+      } else if (mediaType.startsWith('image/') || path.match(/\.(png|jpe?g|gif|svg|webp)$/i)) {
+        imageFiles.push({ path, url: contentUrl, mediaType });
+      }
+    }
+    return { chapterFiles, cssFiles, imageFiles };
+  }
+
   // isbnOverride lets a catalog-initiated download target a specific book even
   // if the current URL is not that book's page. Falls back to the page URL for
   // the classic "download the book I'm viewing" flow.
@@ -95,56 +139,36 @@
     const zip = new JSZip();
 
     try {
-      // Fetch all pages of the file manifest (API is paginated, ~20 per page)
-      const allFiles = [];
-      let nextUrl = `/api/v2/epubs/urn:orm:book:${isbn}/files/?limit=200`;
-      while (nextUrl) {
-        const filesRes = await fetch(nextUrl, { credentials: 'include', signal });
-        if (!filesRes.ok) throw new Error(`Manifest fetch failed: ${filesRes.status}`);
-        const filesData = await filesRes.json();
-        const results = filesData.results || filesData;
-        allFiles.push(...(Array.isArray(results) ? results : []));
-        // Follow pagination; convert absolute URL to relative path
-        if (filesData.next) {
-          const u = new URL(filesData.next);
-          nextUrl = u.pathname + u.search;
-        } else {
-          nextUrl = null;
-        }
-      }
-      console.log(`Manifest loaded: ${allFiles.length} files total`);
+      // Load and classify the manifest, retrying while it comes back empty.
+      // A catalog download opens a fresh tab and fires immediately, but the
+      // file-manifest API can briefly return nothing before the book's reader
+      // session is ready — trusting the first response yielded empty EPUBs.
+      const MAX_MANIFEST_ATTEMPTS = 6;
+      let allFiles = [];
+      let chapterFiles = [];
+      let cssFiles = [];
+      let imageFiles = [];
 
-      const chapterFiles = [];
-      const cssFiles = [];
-      const imageFiles = [];
-
-      for (const file of allFiles) {
-        const path = file.full_path || file.filename || '';
-        const kind = file.kind || '';
-        const mediaType = file.media_type || '';
-        const contentUrl = `/api/v2/epubs/urn:orm:book:${isbn}/files/${path}`;
-
-        if (kind === 'chapter' || mediaType === 'text/html' || mediaType === 'application/xhtml+xml') {
-          chapterFiles.push({ path, url: contentUrl });
-        } else if (mediaType === 'text/css' || path.match(/\.css$/i)) {
-          cssFiles.push({ path, url: contentUrl });
-        } else if (mediaType.startsWith('image/') || path.match(/\.(png|jpe?g|gif|svg|webp)$/i)) {
-          imageFiles.push({ path, url: contentUrl, mediaType });
-        }
+      // A real manifest fetch error (non-OK, expired session) propagates
+      // immediately to the catch below. We only retry the empty-but-OK case,
+      // which is what a not-yet-ready fresh tab produces.
+      for (let attempt = 1; attempt <= MAX_MANIFEST_ATTEMPTS; attempt++) {
+        if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+        allFiles = await loadManifest(isbn, signal);
+        ({ chapterFiles, cssFiles, imageFiles } = classifyFiles(isbn, allFiles));
+        console.log(`Manifest attempt ${attempt}: ${allFiles.length} files, ${chapterFiles.length} chapters`);
+        if (chapterFiles.length > 0) break;
+        // Empty so far — the reader session may still be warming up; wait and retry.
+        if (attempt < MAX_MANIFEST_ATTEMPTS) await new Promise(r => setTimeout(r, 1500));
       }
 
-      console.log(`Found: ${chapterFiles.length} chapters, ${cssFiles.length} CSS, ${imageFiles.length} images`);
-
-      // Don't produce a valid-but-empty EPUB. If nothing classified as a
-      // chapter, the manifest either used unexpected field names or this isn't
-      // a text book — surface it instead of silently downloading blank content.
+      // Don't produce a valid-but-empty EPUB. If nothing classified as a chapter
+      // even after retries, surface it instead of silently downloading blank.
       if (chapterFiles.length === 0) {
-        // Log a sample so we can see the real manifest shape in the console.
         console.error('No chapters found. Manifest sample:', allFiles.slice(0, 3));
         throw new Error(
           `No readable chapters found (manifest had ${allFiles.length} files). ` +
-          `The book may use an unexpected format — open DevTools and check the ` +
-          `"Manifest sample" log to see the file fields.`
+          `Try again in a few seconds, or the book may use an unexpected format.`
         );
       }
       if (chapterFiles.length > 100) {
