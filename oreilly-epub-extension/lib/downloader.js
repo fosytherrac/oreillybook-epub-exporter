@@ -27,8 +27,12 @@ const Downloader = {
   },
 
   // Fetch every page of a book's file manifest (the API is paginated).
+  // Returns { files, count } — `count` is O'Reilly's reported total-file count,
+  // which is authoritative: count===0 means the title genuinely has no EPUB
+  // files (e.g. a video/audio/interactive title), so retrying is pointless.
   async loadManifest(apiBase, isbn, signal) {
     const allFiles = [];
+    let count = null;
     let nextPath = `/api/v2/epubs/urn:orm:book:${isbn}/files/?limit=200`;
     while (nextPath) {
       const filesRes = await fetch(`${apiBase}${nextPath}`, { credentials: 'include', signal });
@@ -42,6 +46,7 @@ const Downloader = {
       } catch (e) {
         throw new Error('SESSION_EXPIRED');
       }
+      if (typeof filesData.count === 'number') count = filesData.count;
       const results = filesData.results || filesData;
       allFiles.push(...(Array.isArray(results) ? results : []));
       if (filesData.next) {
@@ -51,7 +56,7 @@ const Downloader = {
         nextPath = null;
       }
     }
-    return allFiles;
+    return { files: allFiles, count };
   },
 
   // Split a manifest into chapter / CSS / image buckets (URLs prefixed).
@@ -194,19 +199,32 @@ const Downloader = {
     let chapterFiles = [];
     let cssFiles = [];
     let imageFiles = [];
+    let reportedCount = null;
+    let emptyCountStreak = 0;
     for (let attempt = 1; attempt <= MAX_MANIFEST_ATTEMPTS; attempt++) {
       if (signal && signal.aborted) throw new DOMException('Aborted', 'AbortError');
-      allFiles = await this.loadManifest(apiBase, isbn, signal);
+      const manifest = await this.loadManifest(apiBase, isbn, signal);
+      allFiles = manifest.files;
+      reportedCount = manifest.count;
       ({ chapterFiles, cssFiles, imageFiles } = this.classifyFiles(apiBase, isbn, allFiles));
-      console.log(`Manifest attempt ${attempt}: ${allFiles.length} files, ${chapterFiles.length} chapters`);
+      console.log(`Manifest attempt ${attempt}: count=${reportedCount}, ${allFiles.length} files, ${chapterFiles.length} chapters`);
       if (chapterFiles.length > 0) break;
+      // An authoritative count:0 means the title has no EPUB files at all —
+      // retrying won't help. Confirm once (guards a transient blip) then stop.
+      if (reportedCount === 0 && ++emptyCountStreak >= 2) break;
       if (attempt < MAX_MANIFEST_ATTEMPTS) await new Promise(r => setTimeout(r, 1500));
     }
     if (chapterFiles.length === 0) {
-      console.error('No chapters found. Manifest sample:', allFiles.slice(0, 3));
+      console.error('No chapters found. count:', reportedCount, 'sample:', allFiles.slice(0, 3));
+      if (reportedCount === 0 || allFiles.length === 0) {
+        throw new Error(
+          'This title has no downloadable EPUB files — it looks like a video, ' +
+          'audiobook, or interactive/early-release title rather than a standard e-book.'
+        );
+      }
       throw new Error(
-        `No readable chapters found (manifest had ${allFiles.length} files). ` +
-        `Try again in a few seconds, or the book may use an unexpected format.`
+        `No readable chapters found (the manifest listed ${allFiles.length} files, ` +
+        `but none were chapters). This book may use an unsupported format.`
       );
     }
 
