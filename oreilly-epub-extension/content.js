@@ -90,7 +90,7 @@
       chrome.runtime.sendMessage({
         action: 'downloadError',
         error: err.message === 'SESSION_EXPIRED'
-          ? 'Session expired. Please log in to O\'Reilly and try again.'
+          ? 'Not signed in to O\'Reilly (or your session expired). Please log in and try again.'
           : err.message,
       });
     } finally {

@@ -139,7 +139,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             if (res.status === 401) throw new Error('SESSION_EXPIRED');
             if (res.status === 429 || res.status === 403) throw new Error('RATE_LIMITED');
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
-            const json = await res.json();
+            // Logged out, the API can return a login page (HTML) with a 200.
+            let json;
+            try {
+              json = await res.json();
+            } catch (e) {
+              throw new Error('SESSION_EXPIRED');
+            }
             const parsed = Catalog.parseSearchResponse(json);
             total = parsed.total || total;
 
@@ -177,7 +183,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           });
         } catch (err) {
           const msg = err.message === 'SESSION_EXPIRED'
-            ? 'Session expired. Log in to O\'Reilly and try again.'
+            ? 'You don\'t appear to be signed in to O\'Reilly. Log in and try again.'
             : err.message === 'RATE_LIMITED'
             ? 'O\'Reilly is rate-limiting requests. Wait a moment and try again.'
             : err.message;

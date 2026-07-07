@@ -40,7 +40,7 @@
       btn.classList.remove('downloading');
       btn.textContent = '⚠';
       btn.title = e.message === 'SESSION_EXPIRED'
-        ? 'Session expired — log in to O\'Reilly and retry.'
+        ? 'Not signed in to O\'Reilly (or session expired) — log in and retry.'
         : (e.message || 'Download failed');
       setTimeout(() => { btn.disabled = false; btn.textContent = '📥'; btn.title = 'Download EPUB'; }, 5000);
     } finally {

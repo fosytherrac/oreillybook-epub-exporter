@@ -34,7 +34,14 @@ const Downloader = {
       const filesRes = await fetch(`${apiBase}${nextPath}`, { credentials: 'include', signal });
       if (filesRes.status === 401) throw new Error('SESSION_EXPIRED');
       if (!filesRes.ok) throw new Error(`Manifest fetch failed: ${filesRes.status}`);
-      const filesData = await filesRes.json();
+      // Logged out, O'Reilly may 200-redirect to a login page (HTML, not JSON).
+      // Treat an unparseable manifest as a sign-in problem, not a crash.
+      let filesData;
+      try {
+        filesData = await filesRes.json();
+      } catch (e) {
+        throw new Error('SESSION_EXPIRED');
+      }
       const results = filesData.results || filesData;
       allFiles.push(...(Array.isArray(results) ? results : []));
       if (filesData.next) {
