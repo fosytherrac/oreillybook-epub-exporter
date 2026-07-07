@@ -106,6 +106,58 @@ const Downloader = {
     setTimeout(() => URL.revokeObjectURL(url), 10000);
   },
 
+  // Adaptive-concurrency worker pool (AIMD, TCP-style congestion control).
+  // Keeps `concurrency` requests in flight; additively increases while requests
+  // succeed and halves the moment a worker reports a rate limit (via the
+  // onRateLimit passed to it), converging just under O'Reilly's real ceiling.
+  // Returns results in item order (index-aligned); a worker that throws yields
+  // null for that item, except AbortError/SESSION_EXPIRED which fail the pool.
+  _adaptivePool(items, worker, { startC = 4, minC = 1, maxC = 8, signal, onProgress } = {}) {
+    if (!items.length) return Promise.resolve([]);
+    const results = new Array(items.length);
+    let concurrency = Math.min(startC, maxC);
+    let active = 0, next = 0, done = 0, streak = 0, fatal = null;
+
+    const onRateLimit = () => {                 // multiplicative decrease
+      concurrency = Math.max(minC, Math.floor(concurrency / 2));
+      streak = 0;
+    };
+
+    return new Promise((resolve, reject) => {
+      const pump = () => {
+        if (fatal) { if (active === 0) reject(fatal); return; }
+        if (signal && signal.aborted) {
+          fatal = new DOMException('Aborted', 'AbortError');
+          if (active === 0) reject(fatal);
+          return;
+        }
+        if (done === items.length) { resolve(results); return; }
+        while (active < concurrency && next < items.length) {
+          const k = next++;
+          active++;
+          Promise.resolve()
+            .then(() => worker(items[k], k, onRateLimit))
+            .then((r) => {
+              results[k] = r;
+              streak++;
+              if (streak >= concurrency && concurrency < maxC) { concurrency++; streak = 0; } // additive increase
+            })
+            .catch((e) => {
+              if (e && (e.name === 'AbortError' || e.message === 'SESSION_EXPIRED')) fatal = e;
+              results[k] = null;
+            })
+            .finally(() => {
+              active--;
+              done++;
+              if (onProgress) onProgress(done, items.length);
+              pump();
+            });
+        }
+      };
+      pump();
+    });
+  },
+
   // Build a book for `isbn`.
   //   format 'epub' (default) → returns { blob, filename, title }
   //   format 'pdf'            → returns { html, title } — a single print-ready
@@ -128,17 +180,11 @@ const Downloader = {
       if (collectPdf) pdfImages[name] = { buffer, mime: mime || EpubBuilder._mimeType(name) };
     };
 
-    // Fetch pacing: start fast; the moment O'Reilly returns a 403/429 (observed
-    // to happen on concurrent bursts), drop to a gentle cadence for the rest of
-    // the run — smaller batches AND a pause between them — so we stop
-    // re-triggering the limit. Fetcher's per-request retry/backoff is the safety
-    // net that recovers the individual rejected requests.
-    const IMAGE_CONCURRENCY = 8;
-    const CHAPTER_CONCURRENCY = 5;
-    const SLOW_CONCURRENCY = 2;
-    const THROTTLED_BATCH_DELAY = 1500;
-    let throttled = false;
-    const onRateLimit = () => { throttled = true; };
+    // Fetch pacing is handled by _adaptivePool (AIMD concurrency): it keeps the
+    // pipe full, ramps concurrency up while requests succeed, and halves the
+    // in-flight count the moment O'Reilly returns a 403/429 — converging just
+    // under the real limit instead of bursting into it. Fetcher's per-request
+    // retry/backoff recovers the individual rejected requests.
 
     // Load + classify the manifest, retrying while it comes back empty. A
     // just-opened reader session can briefly return an empty manifest; trusting
@@ -177,7 +223,7 @@ const Downloader = {
     const cssImageMap = {};
     for (const cssFile of cssFiles) {
       try {
-        const res = await Fetcher._fetchWithRetry(cssFile.url, { signal, onRateLimit });
+        const res = await Fetcher._fetchWithRetry(cssFile.url, { signal });
         let cssText = await res.text();
         const filename = uniqueFilename(cssFile.path.split('/').pop());
         cssFilenames.push(filename);
@@ -191,7 +237,7 @@ const Downloader = {
           const imgName = uniqueFilename(Fetcher.stripQueryAndHash(cleanUrl.split('/').pop()));
           const apiUrl = `${apiBase}/api/v2/epubs/urn:orm:book:${isbn}/files/${Fetcher.stripQueryAndHash(resolvedPath)}`;
           try {
-            const imgRes = await Fetcher._fetchWithRetry(apiUrl, { signal, onRateLimit });
+            const imgRes = await Fetcher._fetchWithRetry(apiUrl, { signal });
             putImage(imgName, await imgRes.arrayBuffer());
             cssImageMap[cssImgUrl] = imgName;
           } catch (e) {
@@ -213,64 +259,58 @@ const Downloader = {
     const imageMap = {};
     let downloadedImageCount = 0;
 
-    let imgIdx = 0;
-    while (imgIdx < imageFiles.length) {
-      if (signal && signal.aborted) throw new DOMException('Aborted', 'AbortError');
-      if (throttled && imgIdx > 0) await new Promise(r => setTimeout(r, THROTTLED_BATCH_DELAY));
+    // Fetch image bytes with the adaptive pool, then assign names + write
+    // sequentially so ZIP filenames are deterministic (independent of the order
+    // requests happen to complete in).
+    const imageBuffers = await this._adaptivePool(imageFiles, async (imgFile, idx, onRateLimit) => {
+      const res = await Fetcher._fetchWithRetry(imgFile.url, { signal, onRateLimit });
+      return await res.arrayBuffer();
+    }, {
+      startC: 6, minC: 1, maxC: 12, signal,
+      onProgress: (d) => onProgress({ chapter: 0, totalChapters, images: d, totalImages: imageFiles.length }),
+    });
 
-      const size = throttled ? SLOW_CONCURRENCY : IMAGE_CONCURRENCY;
-      const batch = imageFiles.slice(imgIdx, imgIdx + size);
-      imgIdx += size;
-      await Promise.all(batch.map(async (imgFile) => {
-        const normalizedPath = PathUtils.normalizePath(imgFile.path);
-        const rawFilename = Fetcher.stripQueryAndHash(normalizedPath.split('/').pop());
-        const imgFilename = uniqueFilename(rawFilename);
-        try {
-          const res = await Fetcher._fetchWithRetry(imgFile.url, { signal, onRateLimit });
-          putImage(imgFilename, await res.arrayBuffer(), imgFile.mediaType);
-          manifestImageMap[normalizedPath] = imgFilename;
-          downloadedImageCount++;
-        } catch (e) {
-          console.warn(`Manifest image fetch failed: ${imgFile.path}`, e);
-        }
-      }));
-
-      onProgress({ chapter: 0, totalChapters, images: downloadedImageCount, totalImages: imageFiles.length });
+    for (let k = 0; k < imageFiles.length; k++) {
+      const buf = imageBuffers[k];
+      if (!buf) continue; // failed fetches are non-fatal (image simply omitted)
+      const imgFile = imageFiles[k];
+      const normalizedPath = PathUtils.normalizePath(imgFile.path);
+      const rawFilename = Fetcher.stripQueryAndHash(normalizedPath.split('/').pop());
+      const imgFilename = uniqueFilename(rawFilename);
+      putImage(imgFilename, buf, imgFile.mediaType);
+      manifestImageMap[normalizedPath] = imgFilename;
+      downloadedImageCount++;
     }
 
-    // --- Phase 2: process chapters + inline images ---
+    // --- Phase 2: fetch chapters (adaptive pool), then process in order ---
     const chapters = [];
-    let completedChapters = 0;
 
-    let chIdx = 0;
-    while (chIdx < chapterFiles.length) {
+    // A hard SESSION_EXPIRED/abort must fail the whole run; an ordinary fetch
+    // failure just yields null for that chapter (→ placeholder). We surface the
+    // former by rethrowing it from the worker (the pool marks it fatal).
+    const chapterTexts = await this._adaptivePool(chapterFiles, async (chapterFile, idx, onRateLimit) => {
+      try {
+        const res = await Fetcher._fetchWithRetry(chapterFile.url, { signal, onRateLimit });
+        return await res.text();
+      } catch (err) {
+        if (err.name === 'AbortError' || err.message === 'SESSION_EXPIRED') throw err;
+        console.warn(`Chapter fetch failed: ${chapterFile.path}`, err);
+        return null;
+      }
+    }, {
+      startC: 4, minC: 1, maxC: 8, signal,
+      onProgress: (d) => onProgress({ chapter: d, totalChapters, images: downloadedImageCount, totalImages: imageFiles.length }),
+    });
+
+    for (let idx = 0; idx < chapterFiles.length; idx++) {
       if (signal && signal.aborted) throw new DOMException('Aborted', 'AbortError');
-      if (throttled && chIdx > 0) await new Promise(r => setTimeout(r, THROTTLED_BATCH_DELAY));
-
-      const size = throttled ? SLOW_CONCURRENCY : CHAPTER_CONCURRENCY;
-      const i = chIdx;
-      const batch = chapterFiles.slice(chIdx, chIdx + size);
-      chIdx += size;
-      const batchContents = await Promise.all(
-        batch.map(async (chapterFile) => {
-          try {
-            const res = await Fetcher._fetchWithRetry(chapterFile.url, { signal, onRateLimit });
-            return await res.text();
-          } catch (err) {
-            if (err.name === 'AbortError' || err.message === 'SESSION_EXPIRED') throw err;
-            console.warn(`Chapter fetch failed: ${chapterFile.path}`, err);
-            return null;
-          }
-        })
-      );
-
-      for (let j = 0; j < batch.length; j++) {
-        const chapterOriginalPath = batch[j].path;
-        const chapterNum = i + j + 1;
+      {
+        const chapterOriginalPath = chapterFiles[idx].path;
+        const chapterNum = idx + 1;
         const filename = `chapter_${String(chapterNum).padStart(2, '0')}.xhtml`;
 
-        let xhtml = batchContents[j];
-        if (xhtml === null) {
+        let xhtml = chapterTexts[idx];
+        if (xhtml == null) {
           const placeholder = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
 <html xmlns="http://www.w3.org/1999/xhtml">
@@ -280,7 +320,6 @@ const Downloader = {
           zip.file(`OEBPS/Text/${filename}`, placeholder);
           chapters.push({ filename, title: `Chapter ${chapterNum} (unavailable)` });
           if (collectPdf) chapterHtmls.push({ title: `Chapter ${chapterNum} (unavailable)`, xhtml: placeholder });
-          completedChapters++;
           continue;
         }
 
@@ -328,7 +367,7 @@ const Downloader = {
             const cleanResolved = Fetcher.stripQueryAndHash(normalizedResolved);
             const apiUrl = `${apiBase}/api/v2/epubs/urn:orm:book:${isbn}/files/${cleanResolved}`;
             try {
-              const imgRes = await Fetcher._fetchWithRetry(apiUrl, { signal, onRateLimit });
+              const imgRes = await Fetcher._fetchWithRetry(apiUrl, { signal });
               putImage(imgFilename, await imgRes.arrayBuffer());
               imageMap[imgSrc] = imgFilename;
               chapterImageMap[imgSrc] = imgFilename;
@@ -359,9 +398,6 @@ const Downloader = {
         zip.file(`OEBPS/Text/${filename}`, xhtml);
         chapters.push({ filename, title: chapterTitle });
         if (collectPdf) chapterHtmls.push({ title: chapterTitle, xhtml });
-
-        completedChapters++;
-        onProgress({ chapter: completedChapters, totalChapters, images: downloadedImageCount, totalImages: imageFiles.length });
       }
     }
 
