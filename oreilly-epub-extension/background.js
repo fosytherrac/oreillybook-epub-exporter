@@ -9,6 +9,10 @@ if (typeof importScripts === 'function') {
   importScripts('lib/catalog.js');
 }
 
+// The service worker runs on the chrome-extension:// origin, so relative API
+// paths (which the content script can use directly) must be made absolute here.
+const OREILLY_ORIGIN = 'https://learning.oreilly.com';
+
 const DEFAULT_STATE = {
   status: 'idle', // idle | downloading | complete | error
   progress: null,
@@ -129,7 +133,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           let url = Catalog.buildSearchUrl({ query: effectiveQuery, topic, page, limit });
 
           while (url && books.length < maxBooks && page < 50) {
-            const res = await fetch(url, { credentials: 'include' });
+            // url is a same-origin path (e.g. /api/v2/search/...); make it
+            // absolute because the SW is not on the O'Reilly origin.
+            const res = await fetch(`${OREILLY_ORIGIN}${url}`, { credentials: 'include' });
             if (res.status === 401) throw new Error('SESSION_EXPIRED');
             if (res.status === 429 || res.status === 403) throw new Error('RATE_LIMITED');
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
