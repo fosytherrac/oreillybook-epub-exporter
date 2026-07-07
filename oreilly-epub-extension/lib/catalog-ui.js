@@ -8,11 +8,32 @@
 // same pattern as the other lib modules.
 const CatalogUI = {
   // els: { topic, query, btn, status, results, export }
-  // opts: { maxBooks }
+  // opts: { maxBooks, onDownload }
+  //   onDownload(book, btn) — how a 📥 click is handled. Defaults to asking the
+  //   background to open the book's page and auto-export (used by the popup,
+  //   which can't reliably build in its own short-lived window). The manager
+  //   passes its own handler that builds the EPUB in-page.
   init(els, opts = {}) {
     const maxBooks = opts.maxBooks || 200;
+    const onDownload = opts.onDownload || defaultDownload;
     let lastResults = [];
     let lastLabel = 'oreilly-books';
+
+    function defaultDownload(book, btn) {
+      btn.disabled = true;
+      btn.textContent = '⏳';
+      chrome.runtime.sendMessage(
+        { action: 'downloadBook', isbn: book.isbn, webUrl: book.webUrl, title: book.title },
+        (response) => {
+          if (response && response.ok) {
+            btn.textContent = '✓';
+          } else {
+            btn.disabled = false;
+            btn.textContent = '📥';
+          }
+        }
+      );
+    }
 
     // Populate the category dropdown from the shared Catalog module.
     (Catalog.TOPICS || []).forEach((topic) => {
@@ -29,19 +50,7 @@ const CatalogUI = {
 
     function downloadFromCatalog(book, btn) {
       if (!book.isbn) return;
-      btn.disabled = true;
-      btn.textContent = '⏳';
-      chrome.runtime.sendMessage(
-        { action: 'downloadBook', isbn: book.isbn, webUrl: book.webUrl, title: book.title },
-        (response) => {
-          if (response && response.ok) {
-            btn.textContent = '✓';
-          } else {
-            btn.disabled = false;
-            btn.textContent = '📥';
-          }
-        }
-      );
+      onDownload(book, btn);
     }
 
     function renderResults(books) {

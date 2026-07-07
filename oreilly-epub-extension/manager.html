@@ -34,6 +34,14 @@
     </p>
   </main>
 
+  <!-- EPUB engine (order matters: path-utils → fetcher → optimizer/builder → downloader) -->
+  <script src="lib/jszip.min.js"></script>
+  <script src="lib/path-utils.js"></script>
+  <script src="lib/fetcher.js"></script>
+  <script src="lib/epub-builder.js"></script>
+  <script src="lib/eink-optimizer.js"></script>
+  <script src="lib/downloader.js"></script>
+  <!-- Catalog UI -->
   <script src="lib/catalog.js"></script>
   <script src="lib/catalog-ui.js"></script>
   <script src="manager.js"></script>

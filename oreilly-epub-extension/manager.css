@@ -100,5 +100,6 @@ body {
 }
 .book-row-btn:hover { background: var(--chip); border-color: var(--chip-border); }
 .book-row-btn:disabled { opacity: 0.4; cursor: default; }
+.book-row-btn.downloading { width: auto; min-width: 44px; padding: 0 6px; font-size: 12px; font-weight: 600; opacity: 1; }
 
 .hint { color: var(--muted); font-size: 12px; margin-top: 20px; }

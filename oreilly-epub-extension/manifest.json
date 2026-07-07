@@ -35,6 +35,7 @@
       "lib/fetcher.js",
       "lib/epub-builder.js",
       "lib/eink-optimizer.js",
+      "lib/downloader.js",
       "content.js"
     ]
   }],

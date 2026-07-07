@@ -1,0 +1,352 @@
+// EPUB download engine — runs in any document context (the O'Reilly content
+// script OR an extension page like the full-page manager), because it only
+// needs DOMParser/XMLSerializer (via Fetcher/EinkOptimizer) and fetch.
+//
+// The only environment difference is the API origin:
+//   - content script on learning.oreilly.com → apiBase = '' (same-origin paths)
+//   - extension page (manager) → apiBase = 'https://learning.oreilly.com'
+//     (absolute; cookies + CORS are granted by host_permissions, same as the
+//      background search)
+//
+// Progress is reported through an onProgress callback so each caller can render
+// it however it likes; the engine returns a Blob and the caller triggers the
+// browser download. Global object, same pattern as the other lib modules.
+const Downloader = {
+  // Fetch an absolute (CDN) image through the background SW CORS proxy.
+  _fetchImageViaBackground(url) {
+    return new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage({ action: 'fetchImage', url }, (response) => {
+        if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+        if (!response || !response.ok) return reject(new Error(response?.error || 'Background fetch failed'));
+        const binary = atob(response.data);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        resolve(bytes.buffer);
+      });
+    });
+  },
+
+  // Fetch every page of a book's file manifest (the API is paginated).
+  async loadManifest(apiBase, isbn, signal) {
+    const allFiles = [];
+    let nextPath = `/api/v2/epubs/urn:orm:book:${isbn}/files/?limit=200`;
+    while (nextPath) {
+      const filesRes = await fetch(`${apiBase}${nextPath}`, { credentials: 'include', signal });
+      if (filesRes.status === 401) throw new Error('SESSION_EXPIRED');
+      if (!filesRes.ok) throw new Error(`Manifest fetch failed: ${filesRes.status}`);
+      const filesData = await filesRes.json();
+      const results = filesData.results || filesData;
+      allFiles.push(...(Array.isArray(results) ? results : []));
+      if (filesData.next) {
+        const u = new URL(filesData.next);
+        nextPath = u.pathname + u.search; // re-prefixed with apiBase next loop
+      } else {
+        nextPath = null;
+      }
+    }
+    return allFiles;
+  },
+
+  // Split a manifest into chapter / CSS / image buckets (URLs prefixed).
+  classifyFiles(apiBase, isbn, allFiles) {
+    const chapterFiles = [];
+    const cssFiles = [];
+    const imageFiles = [];
+    for (const file of allFiles) {
+      const path = file.full_path || file.filename || '';
+      const kind = file.kind || '';
+      const mediaType = file.media_type || '';
+      const contentUrl = `${apiBase}/api/v2/epubs/urn:orm:book:${isbn}/files/${path}`;
+
+      if (kind === 'chapter' || mediaType === 'text/html' || mediaType === 'application/xhtml+xml') {
+        chapterFiles.push({ path, url: contentUrl });
+      } else if (mediaType === 'text/css' || path.match(/\.css$/i)) {
+        cssFiles.push({ path, url: contentUrl });
+      } else if (mediaType.startsWith('image/') || path.match(/\.(png|jpe?g|gif|svg|webp)$/i)) {
+        imageFiles.push({ path, url: contentUrl, mediaType });
+      }
+    }
+    return { chapterFiles, cssFiles, imageFiles };
+  },
+
+  // Book title/authors from the search API, falling back to a caller-supplied title.
+  async fetchBookMetadata(apiBase, isbn, fallbackTitle) {
+    try {
+      const res = await fetch(`${apiBase}/api/v2/search/?query=${isbn}&limit=1`, { credentials: 'include' });
+      if (res.ok) {
+        const data = await res.json();
+        const book = data.results?.[0];
+        if (book) {
+          return {
+            title: book.title || fallbackTitle,
+            authors: book.authors?.length ? book.authors : null,
+          };
+        }
+      }
+    } catch (e) { console.warn('Metadata fetch failed:', e); }
+    return { title: fallbackTitle, authors: null };
+  },
+
+  // Trigger a browser download of a Blob (works in content script and pages).
+  triggerBrowserDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 10000);
+  },
+
+  // Build an EPUB for `isbn`. Returns { blob, filename, title }.
+  // opts: { isbn, apiBase='', signal, onProgress, fallbackTitle }
+  async download({ isbn, apiBase = '', signal, onProgress = () => {}, fallbackTitle = '' }) {
+    const zip = new JSZip();
+
+    // Load + classify the manifest, retrying while it comes back empty. A
+    // just-opened reader session can briefly return an empty manifest; trusting
+    // the first response produced blank EPUBs. Real fetch errors propagate.
+    const MAX_MANIFEST_ATTEMPTS = 6;
+    let allFiles = [];
+    let chapterFiles = [];
+    let cssFiles = [];
+    let imageFiles = [];
+    for (let attempt = 1; attempt <= MAX_MANIFEST_ATTEMPTS; attempt++) {
+      if (signal && signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      allFiles = await this.loadManifest(apiBase, isbn, signal);
+      ({ chapterFiles, cssFiles, imageFiles } = this.classifyFiles(apiBase, isbn, allFiles));
+      console.log(`Manifest attempt ${attempt}: ${allFiles.length} files, ${chapterFiles.length} chapters`);
+      if (chapterFiles.length > 0) break;
+      if (attempt < MAX_MANIFEST_ATTEMPTS) await new Promise(r => setTimeout(r, 1500));
+    }
+    if (chapterFiles.length === 0) {
+      console.error('No chapters found. Manifest sample:', allFiles.slice(0, 3));
+      throw new Error(
+        `No readable chapters found (manifest had ${allFiles.length} files). ` +
+        `Try again in a few seconds, or the book may use an unexpected format.`
+      );
+    }
+
+    zip.file('mimetype', 'application/epub+zip', { compression: 'STORE' });
+    zip.file('META-INF/container.xml', EpubBuilder.generateContainer());
+
+    const einkRes = await fetch(chrome.runtime.getURL('styles/eink-override.css'));
+    zip.file('OEBPS/Styles/eink-override.css', await einkRes.text());
+
+    const uniqueFilename = PathUtils.createUniqueNamer();
+
+    const cssFilenames = [];
+    const cssImageMap = {};
+    for (const cssFile of cssFiles) {
+      try {
+        const res = await Fetcher._fetchWithRetry(cssFile.url, { signal });
+        let cssText = await res.text();
+        const filename = uniqueFilename(cssFile.path.split('/').pop());
+        cssFilenames.push(filename);
+
+        const cssImgUrls = Fetcher.extractCssImageUrls(cssText);
+        for (const cssImgUrl of cssImgUrls) {
+          if (cssImageMap[cssImgUrl]) continue;
+          const cleanUrl = Fetcher.stripQueryAndHash(cssImgUrl);
+          const cssDir = cssFile.path.substring(0, cssFile.path.lastIndexOf('/'));
+          const resolvedPath = PathUtils.normalizePath(cssDir + '/' + cleanUrl);
+          const imgName = uniqueFilename(Fetcher.stripQueryAndHash(cleanUrl.split('/').pop()));
+          const apiUrl = `${apiBase}/api/v2/epubs/urn:orm:book:${isbn}/files/${Fetcher.stripQueryAndHash(resolvedPath)}`;
+          try {
+            const imgRes = await Fetcher._fetchWithRetry(apiUrl, { signal });
+            zip.file(`OEBPS/Images/${imgName}`, await imgRes.arrayBuffer());
+            cssImageMap[cssImgUrl] = imgName;
+          } catch (e) {
+            console.warn(`CSS background image fetch failed: ${cssImgUrl}`, e);
+          }
+        }
+
+        for (const [original, newName] of Object.entries(cssImageMap)) {
+          cssText = cssText.split(original).join(`../Images/${newName}`);
+        }
+        zip.file(`OEBPS/Styles/${filename}`, cssText);
+      } catch (e) { console.warn(`CSS fetch failed: ${cssFile.path}`, e); }
+    }
+
+    // --- Phase 1: pre-download manifest images ---
+    const totalChapters = chapterFiles.length;
+    const manifestImageMap = {};
+    const imageMap = {};
+    let downloadedImageCount = 0;
+
+    for (let i = 0; i < imageFiles.length; i += 2) {
+      if (signal && signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      if (i > 0) await new Promise(r => setTimeout(r, 500));
+
+      const batch = imageFiles.slice(i, i + 2);
+      await Promise.all(batch.map(async (imgFile) => {
+        const normalizedPath = PathUtils.normalizePath(imgFile.path);
+        const rawFilename = Fetcher.stripQueryAndHash(normalizedPath.split('/').pop());
+        const imgFilename = uniqueFilename(rawFilename);
+        try {
+          const res = await Fetcher._fetchWithRetry(imgFile.url, { signal });
+          zip.file(`OEBPS/Images/${imgFilename}`, await res.arrayBuffer());
+          manifestImageMap[normalizedPath] = imgFilename;
+          downloadedImageCount++;
+        } catch (e) {
+          console.warn(`Manifest image fetch failed: ${imgFile.path}`, e);
+        }
+      }));
+
+      onProgress({ chapter: 0, totalChapters, images: downloadedImageCount, totalImages: imageFiles.length });
+    }
+
+    // --- Phase 2: process chapters + inline images ---
+    const chapters = [];
+    let completedChapters = 0;
+
+    for (let i = 0; i < chapterFiles.length; i += 2) {
+      if (signal && signal.aborted) throw new DOMException('Aborted', 'AbortError');
+      if (i > 0) await new Promise(r => setTimeout(r, 1000));
+
+      const batch = chapterFiles.slice(i, i + 2);
+      const batchContents = await Promise.all(
+        batch.map(async (chapterFile) => {
+          try {
+            const res = await Fetcher._fetchWithRetry(chapterFile.url, { signal });
+            return await res.text();
+          } catch (err) {
+            if (err.name === 'AbortError' || err.message === 'SESSION_EXPIRED') throw err;
+            console.warn(`Chapter fetch failed: ${chapterFile.path}`, err);
+            return null;
+          }
+        })
+      );
+
+      for (let j = 0; j < batch.length; j++) {
+        const chapterOriginalPath = batch[j].path;
+        const chapterNum = i + j + 1;
+        const filename = `chapter_${String(chapterNum).padStart(2, '0')}.xhtml`;
+
+        let xhtml = batchContents[j];
+        if (xhtml === null) {
+          const placeholder = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><meta charset="utf-8"/><title>Chapter ${chapterNum}</title></head>
+<body><p><em>Chapter ${chapterNum} could not be downloaded.</em></p></body>
+</html>`;
+          zip.file(`OEBPS/Text/${filename}`, placeholder);
+          chapters.push({ filename, title: `Chapter ${chapterNum} (unavailable)` });
+          completedChapters++;
+          continue;
+        }
+
+        const doc = Fetcher.parseXhtml(xhtml);
+        const h1 = doc.querySelector('h1');
+        const titleEl = doc.querySelector('title');
+        const chapterTitle = h1 ? h1.textContent.trim()
+          : titleEl ? titleEl.textContent.trim()
+          : `Chapter ${chapterNum}`;
+
+        const imgUrls = Fetcher.extractImageUrls(xhtml);
+        const chapterImageMap = {};
+
+        for (const imgSrc of imgUrls) {
+          if (imageMap[imgSrc]) {
+            chapterImageMap[imgSrc] = imageMap[imgSrc];
+            continue;
+          }
+
+          const { resolved, isAbsolute } = PathUtils.resolveImagePath(imgSrc, chapterOriginalPath);
+          const normalizedResolved = PathUtils.normalizePath(resolved);
+
+          // Strategy 1: pre-downloaded manifest image by resolved path
+          if (manifestImageMap[normalizedResolved]) {
+            imageMap[imgSrc] = manifestImageMap[normalizedResolved];
+            chapterImageMap[imgSrc] = imageMap[imgSrc];
+            continue;
+          }
+
+          // Strategy 2: match by filename
+          const srcFilename = imgSrc.split('/').pop().split('?')[0];
+          const manifestMatch = Object.entries(manifestImageMap).find(
+            ([path]) => path.split('/').pop() === srcFilename
+          );
+          if (manifestMatch) {
+            imageMap[imgSrc] = manifestMatch[1];
+            chapterImageMap[imgSrc] = imageMap[imgSrc];
+            continue;
+          }
+
+          // Strategy 3: fetch via O'Reilly API (relative image refs)
+          const cleanFilename = Fetcher.stripQueryAndHash(srcFilename);
+          const imgFilename = uniqueFilename(`ch${String(chapterNum).padStart(2, '0')}_${cleanFilename}`);
+          if (!isAbsolute) {
+            const cleanResolved = Fetcher.stripQueryAndHash(normalizedResolved);
+            const apiUrl = `${apiBase}/api/v2/epubs/urn:orm:book:${isbn}/files/${cleanResolved}`;
+            try {
+              const imgRes = await Fetcher._fetchWithRetry(apiUrl, { signal });
+              zip.file(`OEBPS/Images/${imgFilename}`, await imgRes.arrayBuffer());
+              imageMap[imgSrc] = imgFilename;
+              chapterImageMap[imgSrc] = imgFilename;
+              downloadedImageCount++;
+              continue;
+            } catch (e) {
+              console.warn(`API image fetch failed: ${apiUrl}`, e);
+            }
+          }
+
+          // Strategy 4: absolute CDN URL via background CORS proxy
+          if (isAbsolute) {
+            try {
+              const buffer = await this._fetchImageViaBackground(resolved);
+              zip.file(`OEBPS/Images/${imgFilename}`, buffer);
+              imageMap[imgSrc] = imgFilename;
+              chapterImageMap[imgSrc] = imgFilename;
+              downloadedImageCount++;
+            } catch (e) {
+              console.warn(`Image fetch failed (all strategies): ${imgSrc}`, e);
+            }
+          } else {
+            console.warn(`Image not found in manifest or API: ${imgSrc}`);
+          }
+        }
+
+        xhtml = EinkOptimizer.processChapter(xhtml, chapterImageMap);
+        zip.file(`OEBPS/Text/${filename}`, xhtml);
+        chapters.push({ filename, title: chapterTitle });
+
+        completedChapters++;
+        onProgress({ chapter: completedChapters, totalChapters, images: downloadedImageCount, totalImages: imageFiles.length });
+      }
+    }
+
+    const meta = await this.fetchBookMetadata(apiBase, isbn, fallbackTitle);
+    const bookTitle = meta.title || fallbackTitle || `book-${isbn}`;
+    const authors = meta.authors || ['Unknown Author'];
+
+    const metadata = {
+      title: bookTitle, authors, isbn,
+      language: 'en',
+      modified: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    };
+
+    const allCssFiles = [...cssFilenames, 'eink-override.css'];
+    const allImageFiles = [...new Set([
+      ...Object.values(manifestImageMap),
+      ...Object.values(cssImageMap),
+      ...Object.values(imageMap),
+    ])];
+
+    const coverImage = EpubBuilder.findCoverImage(allImageFiles);
+    if (coverImage) {
+      zip.file('OEBPS/Text/cover.xhtml', EpubBuilder.generateCoverXhtml(bookTitle, coverImage));
+      chapters.unshift({ filename: 'cover.xhtml', title: 'Cover' });
+    }
+
+    zip.file('OEBPS/content.opf', EpubBuilder.generateOpf(metadata, chapters, allImageFiles, allCssFiles, coverImage));
+    zip.file('OEBPS/toc.xhtml', EpubBuilder.generateTocXhtml(metadata.title, chapters));
+    zip.file('OEBPS/toc.ncx', EpubBuilder.generateTocNcx(isbn, metadata.title, chapters));
+
+    const blob = await zip.generateAsync({ type: 'blob', mimeType: 'application/epub+zip' });
+    const sanitizedTitle = bookTitle.replace(/[^a-zA-Z0-9\s-]/g, '').replace(/\s+/g, '-').toLowerCase() || `book-${isbn}`;
+    return { blob, filename: `${sanitizedTitle}.epub`, title: bookTitle };
+  },
+};
